@@ -12,7 +12,7 @@ import java.net.URLEncoder
 import java.util.UUID
 
 data class BrowserTab(
-    val id: String = UUID.randomUUID().toString(),
+    val id: String = java.util.UUID.randomUUID().toString(),
     val url: String = "browser://home",
     val title: String = "Start Page",
     val progress: Int = 0,
@@ -20,7 +20,18 @@ data class BrowserTab(
     val canGoBack: Boolean = false,
     val canGoForward: Boolean = false,
     val jsEnabled: Boolean = true,
-    val desktopMode: Boolean = false
+    val desktopMode: Boolean = false,
+    val isIncognito: Boolean = false
+)
+
+data class DownloadItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val fileName: String,
+    val url: String,
+    val size: String,
+    val progress: Float, // 0.0 to 1.0
+    val isCompleted: Boolean,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,6 +59,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
+
+    // Download & Notification States
+    private val _downloads = MutableStateFlow<List<DownloadItem>>(emptyList())
+    val downloads: StateFlow<List<DownloadItem>> = _downloads.asStateFlow()
+
+    private val _toastMessage = MutableStateFlow<String?>(null)
+    val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
+
+    fun showToast(message: String) {
+        _toastMessage.value = message
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(3500)
+            _toastMessage.compareAndSet(message, null)
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -104,9 +130,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             dbMutex.withLock {
                 try {
-                    val currentIds = currentTabs.map { it.id }
+                    val nonIncognitoTabs = currentTabs.filter { !it.isIncognito }
+                    val currentIds = nonIncognitoTabs.map { it.id }
                     repository.deleteTabsExcept(currentIds)
-                    currentTabs.forEachIndexed { index, tab ->
+                    nonIncognitoTabs.forEachIndexed { index, tab ->
                         repository.insertTab(
                             TabEntity(
                                 id = tab.id,
@@ -130,13 +157,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun isBookmarked(url: String): Flow<Boolean> = repository.isBookmarked(url)
 
     // Actions
-    fun createNewTab(url: String = "browser://home") {
+    fun createNewTab(url: String = "browser://home", isIncognito: Boolean = false) {
         val title = when (url) {
-            "browser://home" -> "Start Page"
+            "browser://home" -> if (isIncognito) "Private Tab" else "Start Page"
             "https://www.google.com" -> "Google"
-            else -> "New Tab"
+            else -> if (isIncognito) "Private Tab" else "New Tab"
         }
-        val newTab = BrowserTab(url = url, title = title)
+        val newTab = BrowserTab(url = url, title = title, isIncognito = isIncognito)
         _tabs.update { it + newTab }
         _activeTabId.value = newTab.id
         persistTabsState()
@@ -199,17 +226,124 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         persistTabsState()
     }
 
+    fun startDownload(context: android.content.Context, url: String, fileName: String, sizeText: String) {
+        val downloadId = java.util.UUID.randomUUID().toString()
+        val newDownload = DownloadItem(
+            id = downloadId,
+            fileName = fileName,
+            url = url,
+            size = sizeText,
+            progress = 0f,
+            isCompleted = false
+        )
+        _downloads.update { it + newDownload }
+        showToast("Started downloading $fileName...")
+
+        try {
+            val downloadManager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                setMimeType(android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                    android.webkit.MimeTypeMap.getFileExtensionFromUrl(url)
+                ))
+                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setTitle(fileName)
+                setDescription("Downloading $fileName via Web Browser")
+                setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, fileName)
+            }
+            val id = downloadManager.enqueue(request)
+            showDownloadNotification(context, fileName, "Downloading (0%)...")
+
+            viewModelScope.launch {
+                var completed = false
+                while (!completed) {
+                    kotlinx.coroutines.delay(1000)
+                    val query = android.app.DownloadManager.Query().setFilterById(id)
+                    val cursor = downloadManager.query(query)
+                    if (cursor != null && cursor.moveToFirst()) {
+                        val bytesDownloadedCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                        val totalBytesCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                        val statusCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_STATUS)
+
+                        if (bytesDownloadedCol != -1 && totalBytesCol != -1 && statusCol != -1) {
+                            val bytesDownloaded = cursor.getInt(bytesDownloadedCol)
+                            val totalBytes = cursor.getInt(totalBytesCol)
+                            val status = cursor.getInt(statusCol)
+
+                            val progress = if (totalBytes > 0) (bytesDownloaded.toFloat() / totalBytes) else 0f
+                            _downloads.update { list ->
+                                list.map {
+                                    if (it.id == downloadId) {
+                                        it.copy(
+                                            progress = progress,
+                                            isCompleted = status == android.app.DownloadManager.STATUS_SUCCESSFUL
+                                        )
+                                    } else it
+                                }
+                            }
+
+                            if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
+                                completed = true
+                                showToast("Download completed: $fileName")
+                                showDownloadNotification(context, fileName, "Download completed successfully!")
+                            } else if (status == android.app.DownloadManager.STATUS_FAILED) {
+                                completed = true
+                                showToast("Download failed: $fileName")
+                                showDownloadNotification(context, fileName, "Download failed.")
+                            }
+                        }
+                    } else {
+                        completed = true
+                    }
+                    cursor?.close()
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("BrowserViewModel", "Failed to enqueue download", e)
+            showToast("Failed to start download.")
+        }
+    }
+
+    private fun showDownloadNotification(context: android.content.Context, title: String, message: String) {
+        val channelId = "browser_downloads"
+        val channelName = "Downloads"
+        val notificationManager = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(channelId, channelName, android.app.NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Browser download updates"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val notification = androidx.core.app.NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+
+        try {
+            notificationManager.notify(title.hashCode(), notification)
+        } catch (e: Exception) {
+            android.util.Log.e("BrowserViewModel", "Failed to post notification", e)
+        }
+    }
+
     fun onPageFinished(tabId: String, title: String, url: String) {
+        val tab = _tabs.value.find { it.id == tabId }
+        val isIncognito = tab?.isIncognito == true
+        
         val polishedTitle = if (title.isBlank()) {
             if (url.startsWith("https://www.google.com/search")) "Google Search" else url
         } else {
             title
         }
-        updateTab(tabId) { it.copy(url = url, title = polishedTitle) }
+        updateTab(tabId) { it.copy(url = url, title = if (isIncognito && (title.isBlank() || title == "Start Page")) "Private Page" else polishedTitle) }
         persistTabsState()
 
         // Insert into history (ignore search engine queries if desired or load cleanly)
-        if (url.isNotBlank() && !url.startsWith("about:") && !url.startsWith("chrome:")) {
+        if (!isIncognito && url.isNotBlank() && !url.startsWith("about:") && !url.startsWith("chrome:")) {
             viewModelScope.launch {
                 try {
                     repository.insertHistory(

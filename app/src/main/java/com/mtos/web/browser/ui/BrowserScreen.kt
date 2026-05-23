@@ -95,9 +95,20 @@ fun BrowserScreen(
             if (id !in aliveTabIds) {
                 val wv = webViews.remove(id)
                 if (wv != null) {
+                    val tab = tabs.find { it.id == id }
                     // Detach the WebView clearly from its parent view container and destroy it
                     (wv.parent as? ViewGroup)?.removeView(wv)
                     wv.stopLoading()
+                    if (tab?.isIncognito == true) {
+                        try {
+                            wv.clearCache(true)
+                            wv.clearFormData()
+                            wv.clearHistory()
+                            android.webkit.CookieManager.getInstance().flush()
+                        } catch (e: Exception) {
+                            android.util.Log.e("BrowserScreen", "Error clearing private data", e)
+                        }
+                    }
                     try {
                         wv.removeAllViews()
                         wv.destroy()
@@ -141,6 +152,10 @@ fun BrowserScreen(
     var showTabsSheet by remember { mutableStateOf(false) }
     var showLibrarySheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
+    var showDownloadsSheet by remember { mutableStateOf(false) }
+
+    val downloads by viewModel.downloads.collectAsStateWithLifecycle()
+    val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
 
     // Input state for Search Bar
     var searchInputText by remember { mutableStateOf("") }
@@ -189,209 +204,237 @@ fun BrowserScreen(
     }
     val isCurrentBookmarked by isBookmarkedFlow.collectAsStateWithLifecycle(initialValue = false)
 
-    Scaffold(
-        modifier = modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding(),
-        topBar = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface)
-            ) {
-                // Top Address Bar row
-                Row(
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+            topBar = {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .background(if (activeTab?.isIncognito == true) Color(0xFF1E1E24) else MaterialTheme.colorScheme.surface)
                 ) {
-                    // Encryption indicator or Home badge
-                    val isHttps = activeTab?.url?.startsWith("https://") == true
-                    val isHome = activeTab?.url == "browser://home"
-
-                    Icon(
-                        imageVector = when {
-                            isHome -> Icons.Default.Home
-                            isHttps -> Icons.Default.Lock
-                            else -> Icons.Default.Info
-                        },
-                        contentDescription = "Connection Security Status",
-                        tint = when {
-                            isHome -> MaterialTheme.colorScheme.primary
-                            isHttps -> Color(0xFF4CAF50) // Green Lock
-                            else -> MaterialTheme.colorScheme.error
-                        },
-                        modifier = Modifier
-                            .padding(end = 8.dp)
-                            .size(20.dp)
-                    )
-
-                    // Address Bar Input Box
-                    TextField(
-                        value = searchInputText,
-                        onValueChange = { searchInputText = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { focusState ->
-                                isSearchBarFocused.value = focusState.isFocused
-                            }
-                            .testTag("url_input_field"),
-                        placeholder = {
-                            Text(
-                                "Search or type web address...",
-                                style = LocalTextStyle.current.copy(fontSize = 14.sp)
-                            )
-                        },
-                        singleLine = true,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent
-                        ),
-                        shape = RoundedCornerShape(24.dp),
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            imeAction = ImeAction.Search
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onSearch = {
-                                focusManager.clearFocus()
-                                keyboardController?.hide()
-                                if (searchInputText.isNotBlank()) {
-                                    val resolved = viewModel.resolveUrl(searchInputText)
-                                    viewModel.updateUrl(activeTabId, resolved)
-                                    webViews[activeTabId]?.loadUrl(resolved)
-                                }
-                            }
-                        ),
-                        trailingIcon = {
-                            if (searchInputText.isNotEmpty()) {
-                                IconButton(
-                                    onClick = { searchInputText = "" },
-                                    modifier = Modifier.size(36.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Clear,
-                                        contentDescription = "Clear address bar",
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        }
-                    )
-
-                    // Bookmark star toggle
-                    if (!isHome && activeTab != null) {
-                        IconButton(
-                            onClick = {
-                                activeTab?.let { tab ->
-                                    viewModel.toggleBookmark(tab.url, tab.title)
-                                }
-                            },
-                            modifier = Modifier
-                                .testTag("bookmark_button")
-                                .padding(start = 4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = if (isCurrentBookmarked) "Remove Bookmark" else "Bookmark Page",
-                                tint = if (isCurrentBookmarked) Color(0xFFFFD700) else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Options Dropdown vertical dots
-                    Box(modifier = Modifier.padding(start = 2.dp)) {
-                        IconButton(
-                            onClick = { showMoreMenu = true },
-                            modifier = Modifier.testTag("options_menu_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.MoreVert,
-                                contentDescription = "More browser controls"
-                            )
-                        }
-
-                        DropdownMenu(
-                            expanded = showMoreMenu,
-                            onDismissRequest = { showMoreMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(if (activeTab?.jsEnabled == true) "Disable JavaScript" else "Enable JavaScript") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    viewModel.toggleJs(activeTabId)
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = if (activeTab?.jsEnabled == true) Icons.Default.Close else Icons.Default.Check,
-                                        contentDescription = null
-                                    )
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (activeTab?.desktopMode == true) "Mobile Mode" else "Request Desktop Site") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    viewModel.toggleDesktopMode(activeTabId)
-                                    // Reload with new user agent
-                                    webViews[activeTabId]?.reload()
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Settings,
-                                        contentDescription = null
-                                    )
-                                }
-                            )
-                            
-                            
-                            
-                            
-                            
-                            
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("Open Start Page") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    viewModel.updateUrl(activeTabId, "browser://home")
-                                },
-                                leadingIcon = { Icon(Icons.Default.Home, contentDescription = null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Clear All Cache - Cookies") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    webViews[activeTabId]?.clearCache(true)
-                                    android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                                },
-                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
-                            )
-                        }
-                    }
-                }
-
-                // Loading Progress Bar
-                if (activeTab?.isLoading == true) {
-                    LinearProgressIndicator(
-                        progress = { (activeTab?.progress ?: 0) / 100f },
+                    // Top Address Bar row
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(3.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.Transparent
-                    )
-                } else {
-                    Spacer(modifier = Modifier.height(3.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Encryption indicator or Home badge
+                        val isHttps = activeTab?.url?.startsWith("https://") == true
+                        val isHome = activeTab?.url == "browser://home"
+                        val isIncognito = activeTab?.isIncognito == true
+
+                        Icon(
+                            imageVector = when {
+                                isIncognito -> Icons.Default.Lock
+                                isHome -> Icons.Default.Home
+                                isHttps -> Icons.Default.Lock
+                                else -> Icons.Default.Info
+                            },
+                            contentDescription = "Connection Security Status",
+                            tint = when {
+                                isIncognito -> Color(0xFF9C27B0)
+                                isHome -> MaterialTheme.colorScheme.primary
+                                isHttps -> Color(0xFF4CAF50) // Green Lock
+                                else -> MaterialTheme.colorScheme.error
+                            },
+                            modifier = Modifier
+                                .padding(end = 8.dp)
+                                .size(20.dp)
+                        )
+
+                        // Address Bar Input Box
+                        TextField(
+                            value = searchInputText,
+                            onValueChange = { searchInputText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .focusRequester(focusRequester)
+                                .onFocusChanged { focusState ->
+                                    isSearchBarFocused.value = focusState.isFocused
+                                }
+                                .testTag("url_input_field"),
+                            placeholder = {
+                                Text(
+                                    "Search or type web address...",
+                                    style = LocalTextStyle.current.copy(fontSize = 14.sp)
+                                )
+                            },
+                            singleLine = true,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = if (isIncognito) Color(0xFF2C2C35) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                unfocusedContainerColor = if (isIncognito) Color(0xFF1E1E24) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                                focusedTextColor = if (isIncognito) Color.White else MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = if (isIncognito) Color.LightGray else MaterialTheme.colorScheme.onSurface
+                            ),
+                            shape = RoundedCornerShape(24.dp),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Uri,
+                                imeAction = ImeAction.Search
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onSearch = {
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
+                                    if (searchInputText.isNotBlank()) {
+                                        val resolved = viewModel.resolveUrl(searchInputText)
+                                        viewModel.updateUrl(activeTabId, resolved)
+                                        webViews[activeTabId]?.loadUrl(resolved)
+                                    }
+                                }
+                            ),
+                            trailingIcon = {
+                                if (searchInputText.isNotEmpty()) {
+                                    IconButton(
+                                        onClick = { searchInputText = "" },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Clear,
+                                            contentDescription = "Clear address bar",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        )
+
+                        // Bookmark star toggle
+                        if (!isHome && activeTab != null) {
+                            IconButton(
+                                onClick = {
+                                    activeTab?.let { tab ->
+                                        viewModel.toggleBookmark(tab.url, tab.title)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .testTag("bookmark_button")
+                                    .padding(start = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = if (isCurrentBookmarked) "Remove Bookmark" else "Bookmark Page",
+                                    tint = if (isCurrentBookmarked) Color(0xFFFFD700) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Options Dropdown vertical dots
+                        Box(modifier = Modifier.padding(start = 2.dp)) {
+                            IconButton(
+                                onClick = { showMoreMenu = true },
+                                modifier = Modifier.testTag("options_menu_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "More browser controls",
+                                    tint = if (isIncognito) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(if (activeTab?.jsEnabled == true) "Disable JavaScript" else "Enable JavaScript") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.toggleJs(activeTabId)
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (activeTab?.jsEnabled == true) Icons.Default.Close else Icons.Default.Check,
+                                            contentDescription = null
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (activeTab?.desktopMode == true) "Mobile Mode" else "Request Desktop Site") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.toggleDesktopMode(activeTabId)
+                                        // Reload with new user agent
+                                        webViews[activeTabId]?.reload()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (activeTab?.desktopMode == true) Icons.Default.PhoneAndroid else Icons.Default.Computer,
+                                            contentDescription = null
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Downloads") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showDownloadsSheet = true
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowDownward,
+                                            contentDescription = null
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("New Incognito Tab") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.createNewTab("browser://home", isIncognito = true)
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = Color(0xFF9C27B0)
+                                        )
+                                    }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Open Start Page") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        viewModel.updateUrl(activeTabId, "browser://home")
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.Home, contentDescription = null) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Clear All Cache - Cookies") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        webViews[activeTabId]?.clearCache(true)
+                                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                                    },
+                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
+                                )
+                            }
+                        }
+                    }
+
+                    // Loading Progress Bar
+                    if (activeTab?.isLoading == true) {
+                        LinearProgressIndicator(
+                            progress = { (activeTab?.progress ?: 0) / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = Color.Transparent
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(3.dp))
+                    }
                 }
-            }
-        },
+            },
         bottomBar = {
             BottomAppBar(
                 containerColor = MaterialTheme.colorScheme.surface,
@@ -509,6 +552,7 @@ fun BrowserScreen(
                 // Native start page with Speed Dials dashboard
                 StartPageDashboard(
                     speedDials = speedDials,
+                    isIncognito = activeTab?.isIncognito == true,
                     onSearchQuerySubmitted = { query ->
                         val resolved = viewModel.resolveUrl(query)
                         viewModel.updateUrl(activeTabId, resolved)
@@ -560,6 +604,10 @@ fun BrowserScreen(
                 viewModel.createNewTab("browser://home")
                 showTabsSheet = false
             },
+            onNewIncognitoTabRequested = {
+                viewModel.createNewTab("browser://home", isIncognito = true)
+                showTabsSheet = false
+            },
             onDismiss = { showTabsSheet = false }
         )
     }
@@ -586,11 +634,21 @@ fun BrowserScreen(
             onDismiss = { showLibrarySheet = false }
         )
     }
+
+    // Downloads Explorer Sheet
+    if (showDownloadsSheet) {
+        DownloadsSheet(
+            downloads = downloads,
+            onDismiss = { showDownloadsSheet = false }
+        )
+    }
+    }
 }
 
 @Composable
 fun StartPageDashboard(
     speedDials: List<SpeedDialItem>,
+    isIncognito: Boolean,
     onSearchQuerySubmitted: (String) -> Unit,
     onDialClicked: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -603,10 +661,14 @@ fun StartPageDashboard(
             .fillMaxSize()
             .background(
                 brush = Brush.verticalGradient(
-                    colors = listOf(
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
-                        MaterialTheme.colorScheme.background
-                    )
+                    colors = if (isIncognito) {
+                        listOf(Color(0xFF24252D), Color(0xFF131418))
+                    } else {
+                        listOf(
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
+                            MaterialTheme.colorScheme.background
+                        )
+                    }
                 )
             )
             .padding(16.dp),
@@ -626,17 +688,21 @@ fun StartPageDashboard(
                     .size(48.dp)
                     .background(
                         brush = Brush.linearGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.primary,
-                                MaterialTheme.colorScheme.secondary
-                            )
+                            colors = if (isIncognito) {
+                                listOf(Color(0xFF9C27B0), Color(0xFF673AB7))
+                            } else {
+                                listOf(
+                                    MaterialTheme.colorScheme.primary,
+                                    MaterialTheme.colorScheme.secondary
+                                )
+                            }
                         ),
                         shape = RoundedCornerShape(12.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.Home,
+                    imageVector = if (isIncognito) Icons.Default.Lock else Icons.Default.Home,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(28.dp)
@@ -644,21 +710,22 @@ fun StartPageDashboard(
             }
             Spacer(modifier = Modifier.width(12.dp))
             Text(
-                text = "Web Browser",
+                text = if (isIncognito) "Private Space" else "Web Browser",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.ExtraBold,
                     fontFamily = FontFamily.SansSerif,
                     letterSpacing = (-0.5).sp
                 ),
-                color = MaterialTheme.colorScheme.onBackground
+                color = if (isIncognito) Color.White else MaterialTheme.colorScheme.onBackground
             )
         }
 
         Text(
-            text = "Fast, secure, local search explorer",
+            text = if (isIncognito) "Your history and connection are completely local and off-the-record" else "Fast, secure, local search explorer",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-            modifier = Modifier.padding(bottom = 32.dp)
+            color = if (isIncognito) Color.LightGray else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            modifier = Modifier.padding(bottom = 32.dp),
+            textAlign = TextAlign.Center
         )
 
         // Central visual search input card
@@ -669,7 +736,7 @@ fun StartPageDashboard(
                 .shadow(elevation = 3.dp, shape = RoundedCornerShape(24.dp)),
             shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+                containerColor = if (isIncognito) Color(0xFF23232C) else MaterialTheme.colorScheme.surface
             )
         ) {
             Row(
@@ -681,7 +748,7 @@ fun StartPageDashboard(
                 Icon(
                     imageVector = Icons.Default.Search,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (isIncognito) Color.LightGray else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp)
                 )
 
@@ -691,13 +758,20 @@ fun StartPageDashboard(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("dashboard_search_input"),
-                    placeholder = { Text("Search Google or enter Address...") },
+                    placeholder = { 
+                        Text(
+                            "Search Google or enter Address...",
+                            color = if (isIncognito) Color.Gray else Color.Unspecified
+                        ) 
+                    },
                     singleLine = true,
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = Color.Transparent,
                         unfocusedContainerColor = Color.Transparent,
                         focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent
+                        unfocusedIndicatorColor = Color.Transparent,
+                        focusedTextColor = if (isIncognito) Color.White else MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = if (isIncognito) Color.White else MaterialTheme.colorScheme.onSurface
                     ),
                     keyboardOptions = KeyboardOptions(
                         imeAction = ImeAction.Search
@@ -809,6 +883,7 @@ fun TabsSwitcherSheet(
     onTabSelected: (String) -> Unit,
     onTabClosed: (String) -> Unit,
     onNewTabRequested: () -> Unit,
+    onNewIncognitoTabRequested: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(
@@ -836,20 +911,38 @@ fun TabsSwitcherSheet(
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
                 )
 
-                Button(
-                    onClick = onNewTabRequested,
-                    modifier = Modifier.testTag("add_tab_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("New Tab")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onNewTabRequested,
+                        modifier = Modifier.testTag("add_tab_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("New Tab")
+                    }
+
+                    Button(
+                        onClick = onNewIncognitoTabRequested,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF9C27B0),
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Private")
+                    }
                 }
             }
 
@@ -863,6 +956,7 @@ fun TabsSwitcherSheet(
             ) {
                 items(tabs, key = { it.id }) { tab ->
                     val isActive = tab.id == activeTabId
+                    val isIncognito = tab.isIncognito
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -870,10 +964,13 @@ fun TabsSwitcherSheet(
                                 onClick = { onTabSelected(tab.id) }
                             )
                             .testTag("tab_item_${tab.id}"),
-                        border = if (isActive) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                        border = if (isActive) BorderStroke(2.dp, if (isIncognito) Color(0xFF9C27B0) else MaterialTheme.colorScheme.primary) else null,
                         colors = CardDefaults.cardColors(
-                            containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                            containerColor = if (isActive) {
+                                if (isIncognito) Color(0xFF32233D) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                            } else {
+                                if (isIncognito) Color(0xFF221F2B) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                            }
                         ),
                         shape = RoundedCornerShape(12.dp)
                     ) {
@@ -885,16 +982,31 @@ fun TabsSwitcherSheet(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isIncognito) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "Private",
+                                            tint = Color(0xFF9C27B0),
+                                            modifier = Modifier.size(14.dp).padding(end = 4.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = tab.title,
+                                        style = MaterialTheme.typography.bodyLarge.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isIncognito) Color.White else Color.Unspecified
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                                 Text(
-                                    text = tab.title,
-                                    style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = if (tab.url == "browser://home") "browser://home" else tab.url,
+                                    text = if (tab.url == "browser://home") {
+                                        if (isIncognito) "Private Tab" else "browser://home"
+                                    } else tab.url,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (isIncognito) Color.LightGray else MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -1197,6 +1309,8 @@ fun getOrCreateWebView(
     viewModel: BrowserViewModel,
     webViews: MutableMap<String, WebView>
 ): WebView {
+    val tab = viewModel.tabs.value.find { it.id == tabId }
+    val isIncognito = tab?.isIncognito == true
     return webViews.getOrPut(tabId) {
         WebView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -1205,13 +1319,29 @@ fun getOrCreateWebView(
             )
             settings.apply {
                 javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
+                domStorageEnabled = !isIncognito
+                databaseEnabled = !isIncognito
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 builtInZoomControls = true
                 displayZoomControls = false
-                cacheMode = WebSettings.LOAD_DEFAULT
+                cacheMode = if (isIncognito) WebSettings.LOAD_NO_CACHE else WebSettings.LOAD_DEFAULT
+            }
+            
+            if (isIncognito) {
+                clearCache(true)
+                clearHistory()
+            }
+
+            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                val fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype)
+                val sizeText = if (contentLength > 0) {
+                    val kb = contentLength / 1024
+                    if (kb > 1024) "${kb / 1024} MB" else "$kb KB"
+                } else {
+                    "Unknown size"
+                }
+                viewModel.startDownload(context, url, fileName, sizeText)
             }
 
             webViewClient = object : WebViewClient() {
@@ -1321,3 +1451,134 @@ fun getOrCreateWebView(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DownloadsSheet(
+    downloads: List<DownloadItem>,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text(
+                text = "Downloads Folder",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            if (downloads.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No active or saved downloads",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(downloads.reversed(), key = { it.id }) { item ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp)
+                                ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.fileName,
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = item.url,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = item.size,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (item.isCompleted) {
+                                        Text(
+                                            text = "Completed",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = Color(0xFF4CAF50)
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "Downloading (${(item.progress * 100).toInt()}%)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                                if (!item.isCompleted) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    LinearProgressIndicator(
+                                        progress = { item.progress },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        trackColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
