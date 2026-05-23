@@ -1,0 +1,6 @@
+{
+  "name": "MTOS Browser",
+  "description": "A high-level secure web browser equipped with tabs explorer, speed-dial shortcuts, local logs, and custom search engines.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
