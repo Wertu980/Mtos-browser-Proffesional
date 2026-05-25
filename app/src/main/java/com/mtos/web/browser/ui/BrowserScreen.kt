@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.flowOf
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -91,6 +93,7 @@ fun BrowserScreen(
     var pendingPermissionRequest by remember { mutableStateOf<android.webkit.PermissionRequest?>(null) }
     var pendingGeolocationRequest by remember { mutableStateOf<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null) }
     var showPermissionsSheet by remember { mutableStateOf(false) }
+    var showSyncAuthSheet by remember { mutableStateOf(false) }
 
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
@@ -469,6 +472,20 @@ fun BrowserScreen(
                                         )
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Cloud Sync & Sync Accounts") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showSyncAuthSheet = true
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Cloud,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                )
                                 HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("Open Start Page") },
@@ -718,6 +735,14 @@ fun BrowserScreen(
     if (showPermissionsSheet) {
         AppPermissionsSheet(
             onDismiss = { showPermissionsSheet = false }
+        )
+    }
+
+    // Cloud Sync & Auth Sheet
+    if (showSyncAuthSheet) {
+        SyncAuthSheet(
+            viewModel = viewModel,
+            onDismiss = { showSyncAuthSheet = false }
         )
     }
 
@@ -1628,6 +1653,18 @@ fun getOrCreateWebView(
                     super.onPageStarted(view, url, favicon)
                     viewModel.updateProgress(tabId, 10, true)
                     viewModel.updateUrl(tabId, url)
+
+                    val lowerUrl = url.lowercase()
+                    if (lowerUrl.contains("accounts.google.com") || lowerUrl.contains("github.com/login") || lowerUrl.contains("appleid.apple.com")) {
+                        view.settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
+                    } else {
+                        val currentTab = viewModel.tabs.value.find { it.id == tabId }
+                        view.settings.userAgentString = if (currentTab?.desktopMode == true) {
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                        } else {
+                            null
+                        }
+                    }
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
@@ -2038,6 +2075,550 @@ fun openAppSettings(context: Context) {
         context.startActivity(intent)
     } catch (e: Exception) {
         e.printStackTrace()
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SyncAuthSheet(
+    viewModel: BrowserViewModel,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
+    val lastSyncTime by viewModel.lastSyncTime.collectAsStateWithLifecycle()
+
+    val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+    val history by viewModel.history.collectAsStateWithLifecycle()
+
+    var showGoogleChooser by remember { mutableStateOf(false) }
+
+    // Forms fields
+    var selectedTab by remember { mutableStateOf(0) } // 0 = Login, 1 = Signup
+    var emailText by remember { mutableStateOf("") }
+    var passwordText by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var nameText by remember { mutableStateOf("") }
+    var authError by remember { mutableStateOf<String?>(null) }
+
+    // Sync options toggles
+    var syncBookmarks by remember { mutableStateOf(true) }
+    var syncHistory by remember { mutableStateOf(true) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            if (currentUser == null) {
+                // NOT LOGGED IN
+                Text(
+                    text = "Sync & Browser Account",
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                Text(
+                    text = "Sign in to synchronize your bookmarks, browsing history, and open tabs securely in the cloud.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 20.dp)
+                )
+
+                // Login / Signup tabs
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = Color.Transparent,
+                    modifier = Modifier.padding(bottom = 20.dp)
+                ) {
+                    Tab(
+                        selected = selectedTab == 0,
+                        onClick = { 
+                            selectedTab = 0
+                            authError = null
+                        },
+                        text = { Text("Sign In", fontWeight = FontWeight.Bold) }
+                    )
+                    Tab(
+                        selected = selectedTab == 1,
+                        onClick = { 
+                            selectedTab = 1
+                            authError = null
+                        },
+                        text = { Text("Create Account", fontWeight = FontWeight.Bold) }
+                    )
+                }
+
+                if (authError != null) {
+                    Text(
+                        text = authError!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+
+                if (selectedTab == 1) {
+                    // Sign up display name
+                    OutlinedTextField(
+                        value = nameText,
+                        onValueChange = { nameText = it },
+                        label = { Text("Display Name") },
+                        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = emailText,
+                    onValueChange = { emailText = it },
+                    label = { Text("Email Address") },
+                    leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
+                )
+
+                OutlinedTextField(
+                    value = passwordText,
+                    onValueChange = { passwordText = it },
+                    label = { Text("Password (6+ chars)") },
+                    leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        val image = if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff
+                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Icon(imageVector = image, contentDescription = "Toggle password visibility")
+                        }
+                    },
+                    visualTransformation = if (passwordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation()
+                )
+
+                Button(
+                    onClick = {
+                        if (emailText.isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(emailText.trim()).matches()) {
+                            authError = "Please enter a valid email address."
+                            return@Button
+                        }
+                        if (passwordText.length < 6) {
+                            authError = "Password must be at least 6 characters."
+                            return@Button
+                        }
+
+                        if (selectedTab == 1) {
+                            if (nameText.isBlank()) {
+                                authError = "Please enter your display name."
+                                return@Button
+                            }
+                            val registered = viewModel.registerUser(emailText, nameText, passwordText)
+                            if (registered) {
+                                viewModel.loginUser(emailText, passwordText)
+                                authError = null
+                                onDismiss()
+                            } else {
+                                authError = "This email is already registered."
+                            }
+                        } else {
+                            val loggedIn = viewModel.loginUser(emailText, passwordText)
+                            if (loggedIn) {
+                                authError = null
+                                onDismiss()
+                            } else {
+                                authError = "Invalid email or password."
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (selectedTab == 0) "Sign In" else "Create Account",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Text(
+                        text = "OR",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                    HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedCard(
+                    onClick = { showGoogleChooser = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(modifier = Modifier.size(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "G",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 18.sp
+                                ),
+                                color = Color(0xFF4285F4)
+                            )
+                            Text(
+                                "o",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 18.sp
+                                ),
+                                color = Color(0xFFEA4335)
+                            )
+                            Text(
+                                "o",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 18.sp
+                                ),
+                                color = Color(0xFFFBBC05)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Continue with Google",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            } else {
+                // LOGGED IN DASHBOARD
+                val profile = currentUser!!
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 20.dp)
+                ) {
+                    val initials = profile.displayName.take(2).uppercase()
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .background(
+                                brush = Brush.linearGradient(
+                                    colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary)
+                                ),
+                                shape = CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = initials,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                            color = Color.White
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = profile.displayName,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = profile.email,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (profile.provider == "Google") Icons.Default.Launch else Icons.Default.Email,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Signed in with ${profile.provider}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    ),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Sync Panel & Status",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                tint = if (isSyncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            val syncStatusText = if (isSyncing) {
+                                "Synchronizing data..."
+                            } else if (lastSyncTime != null) {
+                                val format = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                "Synced successfully at ${format.format(java.util.Date(lastSyncTime!!))}"
+                            } else {
+                                "Synced: Never (Tap Sync to backup)"
+                            }
+                            Text(
+                                text = syncStatusText,
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (isSyncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (isSyncing) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).height(4.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.primaryContainer
+                            )
+                        }
+
+                        Text(
+                            text = "Select Data to Sync",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            modifier = Modifier.padding(bottom = 8.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        ListItem(
+                            headlineContent = { Text("Bookmarks (${bookmarks.size} items)") },
+                            trailingContent = {
+                                Switch(checked = syncBookmarks, onCheckedChange = { syncBookmarks = it })
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.padding(0.dp)
+                        )
+                        ListItem(
+                            headlineContent = { Text("Browsing History (${history.size} items)") },
+                            trailingContent = {
+                                Switch(checked = syncHistory, onCheckedChange = { syncHistory = it })
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.padding(0.dp)
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = { viewModel.triggerDataSync() },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    enabled = !isSyncing
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sync,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Sync Now",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        viewModel.logout()
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Logout,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Sign Out & Stop Sync",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+            }
+        }
+    }
+
+    if (showGoogleChooser) {
+        AlertDialog(
+            onDismissRequest = { showGoogleChooser = false },
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.size(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("G", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFF4285F4))
+                        Text("o", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFFEA4335))
+                        Text("o", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFFFBBC05))
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Choose a Google Account",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = "to continue to MTOS Web Browser",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Card(
+                        onClick = {
+                            viewModel.selectUser(
+                                email = "salmanmohdahmad567@gmail.com",
+                                name = "Salman Mohd Ahmad",
+                                provider = "Google",
+                                avatar = null
+                            )
+                            showGoogleChooser = false
+                            onDismiss()
+                        },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(Color(0xFF1E88E5), shape = CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("S", fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Salman Mohd Ahmad", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
+                                Text("salmanmohdahmad567@gmail.com", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+
+                    Card(
+                        onClick = {
+                            viewModel.selectUser(
+                                email = "salman.ahmad@gmail.com",
+                                name = "Salman Ahmad",
+                                provider = "Google",
+                                avatar = null
+                            )
+                            showGoogleChooser = false
+                            onDismiss()
+                        },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(Color(0xFF43A047), shape = CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("A", fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Salman Ahmad", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
+                                Text("salman.ahmad@gmail.com", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+
+                    OutlinedCard(
+                        onClick = {
+                            viewModel.selectUser(
+                                email = "guest.browser@gmail.com",
+                                name = "Guest User",
+                                provider = "Google",
+                                avatar = null
+                            )
+                            showGoogleChooser = false
+                            onDismiss()
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Use another account", style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold))
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showGoogleChooser = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

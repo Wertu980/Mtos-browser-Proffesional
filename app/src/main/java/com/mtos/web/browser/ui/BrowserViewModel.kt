@@ -34,10 +34,29 @@ data class DownloadItem(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class UserProfile(
+    val email: String,
+    val displayName: String,
+    val provider: String,
+    val avatarUrl: String? = null,
+    val joinedTimestamp: Long = System.currentTimeMillis()
+)
+
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
     private val repository = BrowserRepository(database)
     private val dbMutex = Mutex()
+    private val sharedPrefs = application.getSharedPreferences("browser_auth_prefs", android.content.Context.MODE_PRIVATE)
+
+    // User Session & Sync states
+    private val _currentUser = MutableStateFlow<UserProfile?>(null)
+    val currentUser: StateFlow<UserProfile?> = _currentUser.asStateFlow()
+
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
+    private val _lastSyncTime = MutableStateFlow<Long?>(null)
+    val lastSyncTime: StateFlow<Long?> = _lastSyncTime.asStateFlow()
 
     // Observe bookmarks and history
     val bookmarks: StateFlow<List<Bookmark>> = repository.allBookmarks
@@ -76,6 +95,25 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     init {
+        // Restore user session & sync state
+        val savedEmail = sharedPrefs.getString("user_email", null)
+        val savedName = sharedPrefs.getString("user_name", null)
+        val savedProvider = sharedPrefs.getString("user_provider", null)
+        val savedAvatar = sharedPrefs.getString("user_avatar", null)
+        val savedSyncTime = sharedPrefs.getLong("last_sync_time", -1L)
+
+        if (savedEmail != null && savedName != null && savedProvider != null) {
+            _currentUser.value = UserProfile(
+                email = savedEmail,
+                displayName = savedName,
+                provider = savedProvider,
+                avatarUrl = savedAvatar
+            )
+        }
+        if (savedSyncTime != -1L) {
+            _lastSyncTime.value = savedSyncTime
+        }
+
         viewModelScope.launch {
             try {
                 val savedTabs = repository.getAllTabs()
@@ -100,6 +138,77 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             } finally {
                 _isInitialized.value = true
             }
+        }
+    }
+
+    fun selectUser(email: String, name: String, provider: String, avatar: String?) {
+        val profile = UserProfile(email, name, provider, avatar)
+        _currentUser.value = profile
+        sharedPrefs.edit()
+            .putString("user_email", email)
+            .putString("user_name", name)
+            .putString("user_provider", provider)
+            .putString("user_avatar", avatar)
+            .apply()
+        showToast("Signed in as $name.")
+    }
+
+    fun logout() {
+        _currentUser.value = null
+        _lastSyncTime.value = null
+        sharedPrefs.edit()
+            .remove("user_email")
+            .remove("user_name")
+            .remove("user_provider")
+            .remove("user_avatar")
+            .remove("last_sync_time")
+            .apply()
+        showToast("Logged out successfully.")
+    }
+
+    fun registerUser(email: String, name: String, password: String): Boolean {
+        val trimmedEmail = email.trim().lowercase()
+        if (trimmedEmail.isBlank() || name.isBlank() || password.length < 6) return false
+
+        val registered = sharedPrefs.getStringSet("registered_emails", null) ?: mutableSetOf()
+        if (registered.contains(trimmedEmail)) return false
+
+        val updated = registered.toMutableSet().apply { add(trimmedEmail) }
+        sharedPrefs.edit()
+            .putStringSet("registered_emails", updated)
+            .putString("pass_$trimmedEmail", password)
+            .putString("name_$trimmedEmail", name.trim())
+            .apply()
+        return true
+    }
+
+    fun loginUser(email: String, password: String): Boolean {
+        val trimmedEmail = email.trim().lowercase()
+        val registered = sharedPrefs.getStringSet("registered_emails", null) ?: emptySet()
+        if (!registered.contains(trimmedEmail)) return false
+
+        val savedPass = sharedPrefs.getString("pass_$trimmedEmail", null)
+        if (savedPass == password) {
+            val name = sharedPrefs.getString("name_$trimmedEmail", "User") ?: "User"
+            selectUser(trimmedEmail, name, "Email", null)
+            return true
+        }
+        return false
+    }
+
+    fun triggerDataSync() {
+        val user = _currentUser.value ?: return
+        if (_isSyncing.value) return
+
+        _isSyncing.value = true
+        viewModelScope.launch {
+            // Simulated clouds handshake & merging of data
+            kotlinx.coroutines.delay(2000)
+            _isSyncing.value = false
+            val now = System.currentTimeMillis()
+            _lastSyncTime.value = now
+            sharedPrefs.edit().putLong("last_sync_time", now).apply()
+            showToast("Sync completed for ${user.email}!")
         }
     }
 
