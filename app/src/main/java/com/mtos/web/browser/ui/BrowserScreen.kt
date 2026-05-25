@@ -87,6 +87,55 @@ fun BrowserScreen(
     // Persistent Map of WebViews indexed by Tab UUID
     val webViews = remember { mutableStateMapOf<String, WebView>() }
 
+    // Permissions & Geolocation state variables
+    var pendingPermissionRequest by remember { mutableStateOf<android.webkit.PermissionRequest?>(null) }
+    var pendingGeolocationRequest by remember { mutableStateOf<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null) }
+    var showPermissionsSheet by remember { mutableStateOf(false) }
+
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        pendingPermissionRequest?.let { req ->
+            val requested = req.resources
+            val grantedList = mutableListOf<String>()
+            val hasCamera = result[android.Manifest.permission.CAMERA] == true || 
+                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            val hasMic = result[android.Manifest.permission.RECORD_AUDIO] == true || 
+                         androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            
+            for (res in requested) {
+                if (res == android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE && hasCamera) {
+                    grantedList.add(res)
+                } else if (res == android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE && hasMic) {
+                    grantedList.add(res)
+                } else if (res != android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE && res != android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE) {
+                    grantedList.add(res)
+                }
+            }
+            if (grantedList.isNotEmpty()) {
+                req.grant(grantedList.toTypedArray())
+                viewModel.showToast("Permissions granted.")
+            } else {
+                req.deny()
+                viewModel.showToast("Permissions denied.")
+            }
+            pendingPermissionRequest = null
+        }
+
+        pendingGeolocationRequest?.let { (origin, callback) ->
+            val hasLocation = result[android.Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                              result[android.Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
+                              androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            callback.invoke(origin, hasLocation, false)
+            if (hasLocation) {
+                viewModel.showToast("Location sharing enabled.")
+            } else {
+                viewModel.showToast("Location sharing denied.")
+            }
+            pendingGeolocationRequest = null
+        }
+    }
+
     // Synchronize destroyed tabs
     LaunchedEffect(tabs) {
         val aliveTabIds = tabs.map { it.id }.toSet()
@@ -139,7 +188,15 @@ fun BrowserScreen(
 
     // Active WebView helper
     val activeWebView = activeTab?.let { tab ->
-        getOrCreateWebView(context, tab.id, tab.url, viewModel, webViews)
+        getOrCreateWebView(
+            context = context,
+            tabId = tab.id,
+            initialUrl = tab.url,
+            viewModel = viewModel,
+            webViews = webViews,
+            onPermissionRequested = { req -> pendingPermissionRequest = req },
+            onGeolocationRequested = { origin, cb -> pendingGeolocationRequest = origin to cb }
+        )
     }
 
     // Intercept hardware Back Button
@@ -398,6 +455,20 @@ fun BrowserScreen(
                                         )
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("App Permissions & Status") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showPermissionsSheet = true
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Security,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                )
                                 HorizontalDivider()
                                 DropdownMenuItem(
                                     text = { Text("Open Start Page") },
@@ -640,6 +711,155 @@ fun BrowserScreen(
         DownloadsSheet(
             downloads = downloads,
             onDismiss = { showDownloadsSheet = false }
+        )
+    }
+
+    // App Permissions Sheet
+    if (showPermissionsSheet) {
+        AppPermissionsSheet(
+            onDismiss = { showPermissionsSheet = false }
+        )
+    }
+
+    // Website Camera/Microphone permission alert dialog
+    pendingPermissionRequest?.let { req ->
+        val originHost = try {
+            android.net.Uri.parse(req.origin.toString()).host ?: req.origin.toString()
+        } catch(e: Exception) {
+            req.origin.toString()
+        }
+        val requestedResources = req.resources.toList()
+        val isVideo = requestedResources.contains(android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+        val isAudio = requestedResources.contains(android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+        
+        val resourceText = when {
+            isVideo && isAudio -> "Camera and Microphone"
+            isVideo -> "Camera"
+            isAudio -> "Microphone"
+            else -> "Device Resources"
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                req.deny()
+                pendingPermissionRequest = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Website Media Request")
+                }
+            },
+            text = {
+                Text(
+                    text = "The website $originHost wants to access your $resourceText.\n\nAllow this access?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val neededSysPerms = mutableListOf<String>()
+                        if (isVideo) neededSysPerms.add(android.Manifest.permission.CAMERA)
+                        if (isAudio) neededSysPerms.add(android.Manifest.permission.RECORD_AUDIO)
+                        
+                        val missingSysPerms = neededSysPerms.filter {
+                            androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                        }
+                        
+                        if (missingSysPerms.isNotEmpty()) {
+                            permissionLauncher.launch(missingSysPerms.toTypedArray())
+                        } else {
+                            req.grant(req.resources)
+                            viewModel.showToast("Permission granted.")
+                            pendingPermissionRequest = null
+                        }
+                    }
+                ) {
+                    Text("Allow")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        req.deny()
+                        pendingPermissionRequest = null
+                    }
+                ) {
+                    Text("Block")
+                }
+            }
+        )
+    }
+
+    // Website Geolocation permission alert dialog
+    pendingGeolocationRequest?.let { (origin, callback) ->
+        val originHost = try {
+            android.net.Uri.parse(origin).host ?: origin
+        } catch(e: Exception) {
+            origin
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                callback.invoke(origin, false, false)
+                pendingGeolocationRequest = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Website Location Request")
+                }
+            },
+            text = {
+                Text(
+                    text = "The website $originHost wants to access your device's physical location.\n\nAllow this?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val hasFine = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (!hasFine) {
+                            permissionLauncher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                    android.Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        } else {
+                            callback.invoke(origin, true, false)
+                            viewModel.showToast("Location shared.")
+                            pendingGeolocationRequest = null
+                        }
+                    }
+                ) {
+                    Text("Allow")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        callback.invoke(origin, false, false)
+                        pendingGeolocationRequest = null
+                    }
+                ) {
+                    Text("Block")
+                }
+            }
         )
     }
     }
@@ -1307,7 +1527,9 @@ fun getOrCreateWebView(
     tabId: String,
     initialUrl: String,
     viewModel: BrowserViewModel,
-    webViews: MutableMap<String, WebView>
+    webViews: MutableMap<String, WebView>,
+    onPermissionRequested: (android.webkit.PermissionRequest) -> Unit,
+    onGeolocationRequested: (String, android.webkit.GeolocationPermissions.Callback) -> Unit
 ): WebView {
     val tab = viewModel.tabs.value.find { it.id == tabId }
     val isIncognito = tab?.isIncognito == true
@@ -1441,6 +1663,25 @@ fun getOrCreateWebView(
                 override fun onReceivedTitle(view: WebView, title: String) {
                     super.onReceivedTitle(view, title)
                     viewModel.onPageFinished(tabId, title, view.url ?: "")
+                }
+
+                override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
+                    this@apply.post {
+                        onPermissionRequested(request)
+                    }
+                }
+
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: android.webkit.GeolocationPermissions.Callback?
+                ) {
+                    if (origin != null && callback != null) {
+                        this@apply.post {
+                            onGeolocationRequested(origin, callback)
+                        }
+                    } else {
+                        super.onGeolocationPermissionsShowPrompt(origin, callback)
+                    }
                 }
             }
 
@@ -1579,6 +1820,224 @@ fun DownloadsSheet(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppPermissionsSheet(
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var hasCamera by remember { mutableStateOf(false) }
+    var hasMic by remember { mutableStateOf(false) }
+    var hasLocation by remember { mutableStateOf(false) }
+
+    fun checkPermissions() {
+        hasCamera = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasLocation = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    LaunchedEffect(Unit) {
+        checkPermissions()
+    }
+
+    val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        checkPermissions()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp)
+        ) {
+            Text(
+                text = "Browser Capabilities & Permissions",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+
+            Text(
+                text = "These system-level permissions enable advanced capabilities such as video calls, audio recordings (WebRTC), and geolocations inside trust-worthy websites.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 24.dp)
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                PermissionStatusRow(
+                    title = "Camera Access",
+                    description = "Used for web camera, image uploads, and virtual environments.",
+                    isGranted = hasCamera,
+                    icon = Icons.Default.Camera,
+                    onRequestValue = {
+                        launcher.launch(arrayOf(android.Manifest.permission.CAMERA))
+                    }
+                )
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                PermissionStatusRow(
+                    title = "Microphone Access",
+                    description = "Used for voice speech recognition, audio notes, and sound effects.",
+                    isGranted = hasMic,
+                    icon = Icons.Default.Mic,
+                    onRequestValue = {
+                        launcher.launch(arrayOf(android.Manifest.permission.RECORD_AUDIO))
+                    }
+                )
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                PermissionStatusRow(
+                    title = "Location Access",
+                    description = "Shared with maps, weather, and localized web lookup search engines.",
+                    isGranted = hasLocation,
+                    icon = Icons.Default.LocationOn,
+                    onRequestValue = {
+                        launcher.launch(
+                            arrayOf(
+                                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                android.Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Button(
+                onClick = { openAppSettings(context) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Configure in System Settings",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun PermissionStatusRow(
+    title: String,
+    description: String,
+    isGranted: Boolean,
+    icon: ImageVector,
+    onRequestValue: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(
+                    color = if (isGranted) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant,
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isGranted) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.width(16.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        if (isGranted) {
+            ElevatedCard(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = Color(0xFFE8F5E9)
+                )
+            ) {
+                Text(
+                    text = "Enabled",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                    color = Color(0xFF2E7D32),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+        } else {
+            Button(
+                onClick = onRequestValue,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                ),
+                modifier = Modifier.height(32.dp)
+            ) {
+                Text(
+                    text = "Enable",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                )
+            }
+        }
+    }
+}
+
+fun openAppSettings(context: Context) {
+    try {
+        val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = android.net.Uri.fromParts("package", context.packageName, null)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        e.printStackTrace()
     }
 }
 
