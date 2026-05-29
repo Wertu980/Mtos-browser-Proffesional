@@ -16,8 +16,8 @@ android {
     applicationId = "com.mtos.web.browser"
     minSdk = 24
     targetSdk = 36
-    versionCode = 210
-    versionName = "210.0.0.0"
+    versionCode = 250
+    versionName = "250.0.0.5"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

@@ -60,6 +60,31 @@ import com.mtos.web.browser.data.Bookmark
 import com.mtos.web.browser.data.HistoryItem
 import kotlinx.coroutines.launch
 
+const val MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; Pixel 7; Build/TQ3A.230805.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
+const val DESKTOP_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+
+fun getUserAgentForUrl(url: String, isDesktopMode: Boolean): String {
+    if (isDesktopMode) return DESKTOP_USER_AGENT
+    
+    val lowerUrl = url.lowercase()
+    val isOauthOrAuth = lowerUrl.contains("accounts.google.com") ||
+            lowerUrl.contains("oauth") ||
+            lowerUrl.contains("appleid.apple.com") ||
+            (lowerUrl.contains("github.com") && (lowerUrl.contains("login") || lowerUrl.contains("session"))) ||
+            lowerUrl.contains("auth0.com") ||
+            lowerUrl.contains("/login") ||
+            lowerUrl.contains("/signin") ||
+            lowerUrl.contains("/sign-in") ||
+            lowerUrl.contains("facebook.com/dialog/oauth") ||
+            lowerUrl.contains("okta.com")
+
+    if (isOauthOrAuth) {
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    }
+    
+    return MOBILE_USER_AGENT
+}
+
 // Speed Dial model
 data class SpeedDialItem(
     val title: String,
@@ -234,15 +259,9 @@ fun BrowserScreen(
         val tab = activeTab ?: return@LaunchedEffect
         val webView = webViews[tab.id] ?: return@LaunchedEffect
         webView.settings.javaScriptEnabled = tab.jsEnabled
-        if (tab.desktopMode) {
-            webView.settings.userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            webView.settings.useWideViewPort = true
-            webView.settings.loadWithOverviewMode = true
-        } else {
-            webView.settings.userAgentString = null
-            webView.settings.useWideViewPort = true
-            webView.settings.loadWithOverviewMode = true
-        }
+        webView.settings.userAgentString = getUserAgentForUrl(webView.url ?: tab.url, tab.desktopMode)
+        webView.settings.useWideViewPort = true
+        webView.settings.loadWithOverviewMode = true
     }
 
     // Speed Dial pre-loaded shortcuts
@@ -1558,6 +1577,7 @@ fun getOrCreateWebView(
 ): WebView {
     val tab = viewModel.tabs.value.find { it.id == tabId }
     val isIncognito = tab?.isIncognito == true
+    val isDesktop = tab?.desktopMode == true
     return webViews.getOrPut(tabId) {
         WebView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -1565,7 +1585,7 @@ fun getOrCreateWebView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             settings.apply {
-                javaScriptEnabled = true
+                javaScriptEnabled = tab?.jsEnabled ?: true
                 domStorageEnabled = !isIncognito
                 databaseEnabled = !isIncognito
                 useWideViewPort = true
@@ -1573,6 +1593,13 @@ fun getOrCreateWebView(
                 builtInZoomControls = true
                 displayZoomControls = false
                 cacheMode = if (isIncognito) WebSettings.LOAD_NO_CACHE else WebSettings.LOAD_DEFAULT
+                userAgentString = getUserAgentForUrl(initialUrl, isDesktop)
+            }
+            
+            val webViewInstance = this
+            android.webkit.CookieManager.getInstance().apply {
+                setAcceptCookie(!isIncognito)
+                setAcceptThirdPartyCookies(webViewInstance, !isIncognito)
             }
             
             if (isIncognito) {
@@ -1653,18 +1680,7 @@ fun getOrCreateWebView(
                     super.onPageStarted(view, url, favicon)
                     viewModel.updateProgress(tabId, 10, true)
                     viewModel.updateUrl(tabId, url)
-
-                    val lowerUrl = url.lowercase()
-                    if (lowerUrl.contains("accounts.google.com") || lowerUrl.contains("github.com/login") || lowerUrl.contains("appleid.apple.com")) {
-                        view.settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-                    } else {
-                        val currentTab = viewModel.tabs.value.find { it.id == tabId }
-                        view.settings.userAgentString = if (currentTab?.desktopMode == true) {
-                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-                        } else {
-                            null
-                        }
-                    }
+                    view.settings.userAgentString = getUserAgentForUrl(url, isDesktop)
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
