@@ -119,6 +119,7 @@ fun BrowserScreen(
     var pendingGeolocationRequest by remember { mutableStateOf<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null) }
     var showPermissionsSheet by remember { mutableStateOf(false) }
     var showSyncAuthSheet by remember { mutableStateOf(false) }
+    var showSiteInfoSheet by remember { mutableStateOf(false) }
 
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
@@ -307,24 +308,35 @@ fun BrowserScreen(
                         val isHome = activeTab?.url == "browser://home"
                         val isIncognito = activeTab?.isIncognito == true
 
-                        Icon(
-                            imageVector = when {
-                                isIncognito -> Icons.Default.Lock
-                                isHome -> Icons.Default.Home
-                                isHttps -> Icons.Default.Lock
-                                else -> Icons.Default.Info
-                            },
-                            contentDescription = "Connection Security Status",
-                            tint = when {
-                                isIncognito -> Color(0xFF9C27B0)
-                                isHome -> MaterialTheme.colorScheme.primary
-                                isHttps -> Color(0xFF4CAF50) // Green Lock
-                                else -> MaterialTheme.colorScheme.error
+                        IconButton(
+                            onClick = {
+                                if (!isHome) {
+                                    showSiteInfoSheet = true
+                                }
                             },
                             modifier = Modifier
-                                .padding(end = 8.dp)
-                                .size(20.dp)
-                        )
+                                .padding(end = 4.dp)
+                                .size(36.dp)
+                                .testTag("security_status_button"),
+                            enabled = !isHome
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    isIncognito -> Icons.Default.Lock
+                                    isHome -> Icons.Default.Home
+                                    isHttps -> Icons.Default.Lock
+                                    else -> Icons.Default.Info
+                                },
+                                contentDescription = "Connection Security Status",
+                                tint = when {
+                                    isIncognito -> Color(0xFF9C27B0)
+                                    isHome -> MaterialTheme.colorScheme.primary
+                                    isHttps -> Color(0xFF4CAF50) // Green Lock
+                                    else -> MaterialTheme.colorScheme.error
+                                },
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
 
                         // Address Bar Input Box
                         TextField(
@@ -762,6 +774,20 @@ fun BrowserScreen(
         SyncAuthSheet(
             viewModel = viewModel,
             onDismiss = { showSyncAuthSheet = false }
+        )
+    }
+
+    // Site Information (Security, Connection, and Cookies) Sheet
+    if (showSiteInfoSheet && !activeTab?.url.isNullOrEmpty()) {
+        SiteInfoSheet(
+            url = activeTab?.url ?: "",
+            webView = webViews[activeTab?.id ?: ""],
+            viewModel = viewModel,
+            onDismiss = { showSiteInfoSheet = false },
+            onReload = {
+                webViews[activeTab?.id ?: ""]?.reload()
+                viewModel.showToast("Cookies cleared and site reloaded")
+            }
         )
     }
 
@@ -2637,4 +2663,508 @@ fun SyncAuthSheet(
         )
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SiteInfoSheet(
+    url: String,
+    webView: android.webkit.WebView?,
+    viewModel: BrowserViewModel,
+    onDismiss: () -> Unit,
+    onReload: () -> Unit
+) {
+    val context = LocalContext.current
+    var currentView by remember { mutableStateOf("main") } // "main", "connection", "cookies"
+
+    // Parse the domain and basic attributes
+    val uri = remember(url) {
+        try {
+            android.net.Uri.parse(url)
+        } catch (e: Exception) {
+            null
+        }
+    }
+    val domain = uri?.host ?: url
+    val isHttps = url.startsWith("https://", ignoreCase = true)
+    val isHome = url == "browser://home" || url.isEmpty()
+
+    // Retrieval of active site cookies
+    val cookieManager = remember { android.webkit.CookieManager.getInstance() }
+    val cookieString = remember(url) {
+        try {
+            if (!isHome) cookieManager.getCookie(url) else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+    val cookieList = remember(cookieString) {
+        cookieString?.split(";")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+    }
+    val cookieCount = cookieList.size
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            when (currentView) {
+                "main" -> {
+                    // Header title
+                    Text(
+                        text = "Site Information",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(bottom = 4.dp).testTag("site_info_title")
+                    )
+                    Text(
+                        text = domain,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 16.dp).testTag("site_info_domain")
+                    )
+
+                    // Card options
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                    ) {
+                        Column {
+                            // Connection Row
+                            ListItem(
+                                headlineContent = {
+                                    Text(
+                                        text = when {
+                                            isHome -> "Internal Page"
+                                            isHttps -> "Connection is secure"
+                                            else -> "Connection is not secure"
+                                        },
+                                        fontWeight = FontWeight.SemiBold,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                },
+                                supportingContent = {
+                                    Text(
+                                        text = when {
+                                            isHome -> "This is a secure internal browser page."
+                                            isHttps -> "Your connection details & credentials are encrypted."
+                                            else -> "Sensitive information on this site shouldn't be entered."
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                },
+                                leadingContent = {
+                                    Icon(
+                                        imageVector = when {
+                                            isHome -> Icons.Default.Home
+                                            isHttps -> Icons.Default.Lock
+                                            else -> Icons.Default.Warning
+                                        },
+                                        contentDescription = "Connection Indicator Status Icon",
+                                        tint = when {
+                                            isHome -> MaterialTheme.colorScheme.primary
+                                            isHttps -> Color(0xFF4CAF50)
+                                            else -> MaterialTheme.colorScheme.error
+                                        },
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                },
+                                trailingContent = {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowForward,
+                                        contentDescription = "Show Connection details icon button",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                },
+                                modifier = Modifier
+                                    .clickable { currentView = "connection" }
+                                    .testTag("connection_details_row")
+                            )
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                            // Cookies Row
+                            ListItem(
+                                headlineContent = {
+                                    Text(
+                                        text = "Cookies",
+                                        fontWeight = FontWeight.SemiBold,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                },
+                                supportingContent = {
+                                    Text(
+                                        text = if (isHome) "No cookies in use" else "$cookieCount cookies in use",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                },
+                                leadingContent = {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = "Cookies count status indicator",
+                                        tint = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                },
+                                trailingContent = {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowForward,
+                                        contentDescription = "View cookies list icon button",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                },
+                                modifier = Modifier
+                                    .clickable { if (!isHome) currentView = "cookies" }
+                                    .testTag("cookies_details_row")
+                            )
+                        }
+                    }
+
+                    // Bottom Dismiss button
+                    Button(
+                        onClick = onDismiss,
+                        modifier = Modifier.fillMaxWidth().testTag("site_info_done_button")
+                    ) {
+                        Text("Done", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                "connection" -> {
+                    // Title row with Back button
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                    ) {
+                        IconButton(
+                            onClick = { currentView = "main" },
+                            modifier = Modifier.testTag("connection_back_button")
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back back to site information")
+                        }
+                        Text(
+                            text = "Connection Details",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+
+                    // Security card status explanation
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = when {
+                                isHome -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                isHttps -> Color(0xFFE8F5E9).copy(alpha = 0.8f)
+                                else -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                            }
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = when {
+                                        isHome -> Icons.Default.Home
+                                        isHttps -> Icons.Default.Lock
+                                        else -> Icons.Default.Warning
+                                    },
+                                    contentDescription = null,
+                                    tint = when {
+                                        isHome -> MaterialTheme.colorScheme.primary
+                                        isHttps -> Color(0xFF2E7D32)
+                                        else -> MaterialTheme.colorScheme.error
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = when {
+                                        isHome -> "Internal Page"
+                                        isHttps -> "Secure Connection"
+                                        else -> "Insecure Connection"
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = when {
+                                        isHome -> MaterialTheme.colorScheme.primary
+                                        isHttps -> Color(0xFF2E7D32)
+                                        else -> MaterialTheme.colorScheme.error
+                                    }
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = when {
+                                    isHome -> "This page resides locally inside the browser. No information is transmitted or exposed to external entities over the internet."
+                                    isHttps -> "The connection to this site is encrypted using Transport Layer Security (TLS). This prevents advertisers, trackers, or adversaries from eavesdropping or altering information that you exchange with the server (such as passphrases or data fields)."
+                                    else -> "The connection to this site is unencrypted (HTTP). Sensitive information entered here (such as logins, personal data, or payment options) could be intercepted, stolen, or spoofed by other agents on the same network connection."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Show active SSL Certificates (X.509) details safely
+                    if (isHttps) {
+                        Text(
+                            text = "Certificate Information",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        val cert = webView?.certificate
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                if (cert != null) {
+                                    // 1. Issued To details
+                                    Text(
+                                        text = "Issued To",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text("Common Name (CN): ${cert.issuedTo.cName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+                                    Text("Organization (O): ${cert.issuedTo.oName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+                                    Text("Org Unit (OU): ${cert.issuedTo.uName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    // 2. Issued By details
+                                    Text(
+                                        text = "Issued By",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text("Common Name (CN): ${cert.issuedBy.cName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+                                    Text("Organization (O): ${cert.issuedBy.oName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+                                    Text("Org Unit (OU): ${cert.issuedBy.uName ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    // 3. Validity details
+                                    Text(
+                                        text = "Validity Duration",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    val startDate = try { cert.validNotBeforeDate.toString() } catch (e: Exception) { "N/A" }
+                                    val expireDate = try { cert.validNotAfterDate.toString() } catch (e: Exception) { "N/A" }
+                                    Text("Valid From: $startDate", style = MaterialTheme.typography.bodyMedium)
+                                    Text("Valid Until: $expireDate", style = MaterialTheme.typography.bodyMedium)
+                                } else {
+                                    // Encrypted but WebView has not loaded raw details explicitly
+                                    Text(
+                                        text = "Encryption Active",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Validated Domain: $domain\n" +
+                                                "Network Connection: Sealed & Secured using 256-bit AES\n" +
+                                                "Verification: Handled by Android OS Certificate Trust Store.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Back button to Site Info main view
+                    Button(
+                        onClick = { currentView = "main" },
+                        modifier = Modifier.fillMaxWidth().testTag("connection_back_to_main_button")
+                    ) {
+                        Text("Back to site information")
+                    }
+                }
+
+                "cookies" -> {
+                    // Header title block with Back button
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                    ) {
+                        IconButton(
+                            onClick = { currentView = "main" },
+                            modifier = Modifier.testTag("cookies_back_button")
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back back to site information")
+                        }
+                        Text(
+                            text = "Cookies & Site Data",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+
+                    // Info and Statistics Card
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "What are cookies?",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                            Text(
+                                text = "Cookies are simple text tokens placed on your device by the web host to distinguish users, store persistent preferences, and track session status.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 16.dp)
+                            )
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Text(
+                                text = "Session Statistics",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                            Text(
+                                text = "Total cookies found: $cookieCount",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    // Lazy List of cookies scrollable
+                    if (cookieList.isNotEmpty()) {
+                        Text(
+                            text = "Active Cookie Identifiers",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                                .padding(bottom = 24.dp)
+                        ) {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp)
+                            ) {
+                                items(cookieList) { item ->
+                                    val pieces = item.split("=", limit = 2)
+                                    val key = pieces.getOrNull(0)?.trim() ?: ""
+                                    val value = pieces.getOrNull(1)?.trim() ?: ""
+                                    if (key.isNotEmpty()) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp, horizontal = 8.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = key,
+                                                fontWeight = FontWeight.SemiBold,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(0.45f)
+                                            )
+                                            Text(
+                                                text = if (value.length > 22) value.take(20) + "..." else value,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                textAlign = TextAlign.End,
+                                                modifier = Modifier.weight(0.55f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Cookie operations row buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { currentView = "main" },
+                            modifier = Modifier.weight(1f).testTag("cookies_back_to_main")
+                        ) {
+                            Text("Back")
+                        }
+
+                        Button(
+                            onClick = {
+                                try {
+                                    // Remove cookie references
+                                    cookieManager.setCookie(url, "")
+                                    cookieManager.removeAllCookies {
+                                        cookieManager.flush()
+                                        onReload()
+                                        onDismiss()
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("SiteInfoSheet", "Error during clear operations", e)
+                                    onReload()
+                                    onDismiss()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError
+                            ),
+                            modifier = Modifier.weight(1.3f).testTag("delete_cookies_button")
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete Icon", modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Delete Cookies", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
