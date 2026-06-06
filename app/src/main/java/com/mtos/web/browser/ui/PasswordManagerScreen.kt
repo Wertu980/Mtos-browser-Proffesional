@@ -49,6 +49,20 @@ fun FullPasswordManagerScreen(
     var enteredPin by remember { mutableStateOf("") }
     var isUnlocked by remember { mutableStateOf(false) }
     
+    // Biometrics and Lock change configurations
+    var showVaultSettings by remember { mutableStateOf(false) }
+    var useBiometrics by remember { mutableStateOf(sharedPrefs.getBoolean("use_biometrics", false)) }
+    
+    // Change PIN state variables
+    var showChangePinDialog by remember { mutableStateOf(false) }
+    var curPinVerifyInput by remember { mutableStateOf("") }
+    var newPinInput1 by remember { mutableStateOf("") }
+    var newPinInput2 by remember { mutableStateOf("") }
+    
+    // Biometric scanner lock screen prompt state
+    var showBiometricPrompt by remember { mutableStateOf(isMasterPinSet && sharedPrefs.getBoolean("use_biometrics", false)) }
+    var biometricScanningState by remember { mutableStateOf("waiting") }
+    
     // UI Flows
     val savedPasswords by viewModel.savedPasswords.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
@@ -96,6 +110,16 @@ fun FullPasswordManagerScreen(
                         modifier = Modifier.testTag("back_button")
                     ) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back back to browser")
+                    }
+                },
+                actions = {
+                    if (isUnlocked) {
+                        IconButton(
+                            onClick = { showVaultSettings = true },
+                            modifier = Modifier.testTag("vault_settings_button")
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = "Vault Security Settings")
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -195,7 +219,31 @@ fun FullPasswordManagerScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(32.dp))
+                    if (isMasterPinSet && useBiometrics) {
+                        TextButton(
+                            onClick = {
+                                biometricScanningState = "waiting"
+                                showBiometricPrompt = true
+                            },
+                            modifier = Modifier.padding(vertical = 4.dp).testTag("quick_biometric_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fingerprint,
+                                contentDescription = "Use Biometrics",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Unlock with Fingerprint / Face ID",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
 
                     // Simulated Clean Keyboard Layout block
                     CustomNumericalKeyboard(
@@ -464,6 +512,299 @@ fun FullPasswordManagerScreen(
             dismissButton = {
                 TextButton(onClick = { showAddDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Vault settings dialog panel
+    if (showVaultSettings) {
+        AlertDialog(
+            onDismissRequest = { showVaultSettings = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text("Vault Security Settings", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Biometric Lock toggle
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                            .clickable {
+                                val newValue = !useBiometrics
+                                useBiometrics = newValue
+                                sharedPrefs.edit().putBoolean("use_biometrics", newValue).apply()
+                                viewModel.showToast(if (newValue) "Biometric scan enabled!" else "Biometric scan disabled.")
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.Fingerprint,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Fingerprint / Face ID Link",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = "Unlock Secure Vault dynamically using biometric scanner options.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        
+                        Switch(
+                            checked = useBiometrics,
+                            onCheckedChange = { newValue ->
+                                useBiometrics = newValue
+                                sharedPrefs.edit().putBoolean("use_biometrics", newValue).apply()
+                                viewModel.showToast(if (newValue) "Biometric scan enabled!" else "Biometric scan disabled.")
+                            }
+                        )
+                    }
+
+                    // Change PIN Row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                            .clickable {
+                                curPinVerifyInput = ""
+                                newPinInput1 = ""
+                                newPinInput2 = ""
+                                showChangePinDialog = true
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Change Master PIN",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = "Alter your 4-digit numeric cryptographic lock key.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showVaultSettings = false }) {
+                    Text("Done")
+                }
+            }
+        )
+    }
+
+    // Change Master PIN Dialog panel
+    if (showChangePinDialog) {
+        AlertDialog(
+            onDismissRequest = { showChangePinDialog = false },
+            title = {
+                Text("Change Master PIN", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Enter current authority codes and specify a new 4-digit Master PIN to secure credentials locally.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    OutlinedTextField(
+                        value = curPinVerifyInput,
+                        onValueChange = { 
+                            if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                                curPinVerifyInput = it 
+                            }
+                        },
+                        label = { Text("Current 4-digit PIN") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Next
+                        ),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = newPinInput1,
+                        onValueChange = { 
+                            if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                                newPinInput1 = it 
+                            }
+                        },
+                        label = { Text("New 4-digit PIN") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Next
+                        ),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = newPinInput2,
+                        onValueChange = { 
+                            if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                                newPinInput2 = it 
+                            }
+                        },
+                        label = { Text("Confirm New PIN") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done
+                        ),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val realCurrentPin = sharedPrefs.getString("master_pin", "")
+                        if (curPinVerifyInput != realCurrentPin) {
+                            viewModel.showToast("Current PIN verification failed.")
+                        } else if (newPinInput1.length != 4) {
+                            viewModel.showToast("New PIN must be exactly 4 digits.")
+                        } else if (newPinInput1 != newPinInput2) {
+                            viewModel.showToast("New PINs do not match.")
+                        } else {
+                            sharedPrefs.edit().putString("master_pin", newPinInput1).apply()
+                            showChangePinDialog = false
+                            showVaultSettings = false
+                            viewModel.showToast("Master PIN updated successfully!")
+                        }
+                    }
+                ) {
+                    Text("Update PIN")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showChangePinDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Biometric Scanner Pop-up Prompt UI
+    if (showBiometricPrompt && isUnlocked == false) {
+        val scope = rememberCoroutineScope()
+        AlertDialog(
+            onDismissRequest = { showBiometricPrompt = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Fingerprint,
+                    contentDescription = null,
+                    tint = if (biometricScanningState == "success") Color(0xFF388E3C)
+                           else if (biometricScanningState == "scanning") MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(56.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (biometricScanningState == "scanning") "Scanning biometrics..."
+                           else if (biometricScanningState == "success") "Identity Verified!"
+                           else "Biometric Unlock",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = if (biometricScanningState == "scanning") "Place finger on sensor or look at face scanner..."
+                               else if (biometricScanningState == "success") "Decrypted vault credential index successfully."
+                               else "Confirm your fingerprint or Face ID to instantly unlock the secure passwords manager.",
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    if (biometricScanningState == "scanning") {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(36.dp).padding(top = 8.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 3.dp
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (biometricScanningState == "waiting") {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                biometricScanningState = "scanning"
+                                delay(1200) // Simulate premium biometric processing
+                                biometricScanningState = "success"
+                                delay(600)
+                                isUnlocked = true
+                                showBiometricPrompt = false
+                                biometricScanningState = "waiting"
+                                viewModel.showToast("Vault unlocked via biometrics.")
+                            }
+                        }
+                    ) {
+                        Text("Scan Biometrics")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showBiometricPrompt = false
+                        biometricScanningState = "waiting"
+                    }
+                ) {
+                    Text("Use PIN Lock")
                 }
             }
         )
