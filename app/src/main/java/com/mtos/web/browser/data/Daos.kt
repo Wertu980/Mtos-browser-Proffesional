@@ -69,3 +69,35 @@ interface TabDao {
     }
 }
 
+@Dao
+interface DownloadDao {
+    @Query("SELECT * FROM downloads ORDER BY timestamp DESC")
+    fun getAllDownloads(): Flow<List<DownloadEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDownload(download: DownloadEntity)
+
+    @Query("DELETE FROM downloads WHERE id = :id")
+    suspend fun deleteDownloadById(id: String)
+
+    @Query("DELETE FROM downloads")
+    suspend fun clearAllDownloads()
+}
+
+@Dao
+interface PasswordDao {
+    @Query("SELECT * FROM password_credentials ORDER BY timestamp DESC")
+    fun getAllPasswords(): Flow<List<PasswordCredential>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPassword(credential: PasswordCredential)
+
+    @Delete
+    suspend fun deletePassword(credential: PasswordCredential)
+
+    @Query("DELETE FROM password_credentials WHERE id = :id")
+    suspend fun deletePasswordById(id: Int)
+}
+
+
+

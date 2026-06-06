@@ -115,6 +115,7 @@ fun BrowserScreen(
     val webViews = remember { mutableStateMapOf<String, WebView>() }
 
     // Permissions & Geolocation state variables
+    var activeScreen by remember { mutableStateOf("browser") }
     var pendingPermissionRequest by remember { mutableStateOf<android.webkit.PermissionRequest?>(null) }
     var pendingGeolocationRequest by remember { mutableStateOf<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null) }
     var showPermissionsSheet by remember { mutableStateOf(false) }
@@ -215,6 +216,21 @@ fun BrowserScreen(
         }
     }
 
+    // Media file choosing callback state and result launcher
+    var pendingFilePathCallback by remember { mutableStateOf<android.webkit.ValueCallback<Array<android.net.Uri>>?>(null) }
+
+    val fileChooserLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uriResult = if (result.resultCode == android.app.Activity.RESULT_OK) {
+            android.webkit.WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        } else {
+            null
+        }
+        pendingFilePathCallback?.onReceiveValue(uriResult)
+        pendingFilePathCallback = null
+    }
+
     // Active WebView helper
     val activeWebView = activeTab?.let { tab ->
         getOrCreateWebView(
@@ -224,14 +240,40 @@ fun BrowserScreen(
             viewModel = viewModel,
             webViews = webViews,
             onPermissionRequested = { req -> pendingPermissionRequest = req },
-            onGeolocationRequested = { origin, cb -> pendingGeolocationRequest = origin to cb }
+            onGeolocationRequested = { origin, cb -> pendingGeolocationRequest = origin to cb },
+            onShowFileChooser = { callback, params ->
+                pendingFilePathCallback = callback
+                try {
+                    val intent = params.createIntent()
+                    fileChooserLauncher.launch(intent)
+                } catch (e: Exception) {
+                    android.util.Log.e("BrowserScreen", "Failed to launch device file chooser, fallback to ACTION_GET_CONTENT", e)
+                    try {
+                        val fallback = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+                            type = "*/*"
+                            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                            putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+                        }
+                        fileChooserLauncher.launch(fallback)
+                    } catch (ex: Exception) {
+                        callback.onReceiveValue(null)
+                        pendingFilePathCallback = null
+                    }
+                }
+            }
         )
     }
 
     // Intercept hardware Back Button
     val canGoBack = activeTab?.canGoBack == true && activeTab?.url != "browser://home"
-    BackHandler(enabled = canGoBack) {
-        activeWebView?.goBack()
+    if (activeScreen != "browser") {
+        BackHandler(enabled = true) {
+            activeScreen = "browser"
+        }
+    } else {
+        BackHandler(enabled = canGoBack) {
+            activeWebView?.goBack()
+        }
     }
 
     // Modal Sheet states
@@ -239,6 +281,7 @@ fun BrowserScreen(
     var showLibrarySheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showDownloadsSheet by remember { mutableStateOf(false) }
+    var showAutofillDialog by remember { mutableStateOf(false) }
 
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
@@ -285,7 +328,8 @@ fun BrowserScreen(
     val isCurrentBookmarked by isBookmarkedFlow.collectAsStateWithLifecycle(initialValue = false)
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold(
+        if (activeScreen == "browser") {
+            Scaffold(
             modifier = modifier
                 .fillMaxSize()
                 .statusBarsPadding()
@@ -417,6 +461,22 @@ fun BrowserScreen(
                             }
                         }
 
+                        // Password Manager Quick access autofill
+                        if (!isHome && activeTab != null) {
+                            IconButton(
+                                onClick = { showAutofillDialog = true },
+                                modifier = Modifier
+                                    .testTag("autofill_vault_button")
+                                    .padding(start = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VpnKey,
+                                    contentDescription = "Autofill credentials",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
                         // Options Dropdown vertical dots
                         Box(modifier = Modifier.padding(start = 2.dp)) {
                             IconButton(
@@ -466,12 +526,40 @@ fun BrowserScreen(
                                     text = { Text("Downloads") },
                                     onClick = {
                                         showMoreMenu = false
-                                        showDownloadsSheet = true
+                                        activeScreen = "downloads"
                                     },
                                     leadingIcon = {
                                         Icon(
                                             imageVector = Icons.Default.ArrowDownward,
                                             contentDescription = null
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Bookmarks") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        activeScreen = "bookmarks"
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = null,
+                                            tint = Color(0xFFFFD700)
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("History") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        activeScreen = "history"
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.History,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.secondary
                                         )
                                     }
                                 )
@@ -490,10 +578,10 @@ fun BrowserScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("App Permissions & Status") },
+                                    text = { Text("App Permissions") },
                                     onClick = {
                                         showMoreMenu = false
-                                        showPermissionsSheet = true
+                                        activeScreen = "permissions"
                                     },
                                     leadingIcon = {
                                         Icon(
@@ -504,16 +592,30 @@ fun BrowserScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Cloud Sync & Sync Accounts") },
+                                    text = { Text("Cloud Sync") },
                                     onClick = {
                                         showMoreMenu = false
-                                        showSyncAuthSheet = true
+                                        activeScreen = "sync"
                                     },
                                     leadingIcon = {
                                         Icon(
                                             imageVector = Icons.Default.Cloud,
                                             contentDescription = null,
                                             tint = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Password Vault") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        activeScreen = "passwords"
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.VpnKey,
+                                            contentDescription = null,
+                                            tint = Color(0xFFFF9800)
                                         )
                                     }
                                 )
@@ -611,17 +713,6 @@ fun BrowserScreen(
                         )
                     }
 
-                    // Library (Bookmarks & History toggle)
-                    IconButton(
-                        onClick = { showLibrarySheet = true },
-                        modifier = Modifier.testTag("bookmarks_history_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.List,
-                            contentDescription = "Open Bookmarks and history logs"
-                        )
-                    }
-
                     // Tabs Switcher trigger button with current count badge
                     Box(
                         modifier = Modifier
@@ -706,6 +797,337 @@ fun BrowserScreen(
             }
         }
     }
+} else if (activeScreen == "downloads") {
+        FullDownloadsScreen(
+            downloads = downloads,
+            onDeleteItem = { item ->
+                viewModel.deleteDownload(item.id, item.filePath)
+            },
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "bookmarks") {
+        FullBookmarksScreen(
+            bookmarks = bookmarks,
+            onUrlClicked = { targetUrl ->
+                viewModel.updateUrl(activeTabId, targetUrl)
+                activeWebView?.loadUrl(targetUrl)
+                activeScreen = "browser"
+            },
+            onBookmarkDeleteRequested = { item ->
+                viewModel.toggleBookmark(item.url, item.title)
+            },
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "history") {
+        FullHistoryScreen(
+            history = history,
+            onUrlClicked = { targetUrl ->
+                viewModel.updateUrl(activeTabId, targetUrl)
+                activeWebView?.loadUrl(targetUrl)
+                activeScreen = "browser"
+            },
+            onHistoryDeleteRequested = { historyId ->
+                viewModel.deleteHistoryItem(historyId)
+            },
+            onClearHistory = {
+                viewModel.clearHistory()
+            },
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "permissions") {
+        FullPermissionsScreen(
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "sync") {
+        FullSyncScreen(
+            viewModel = viewModel,
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "passwords") {
+        FullPasswordManagerScreen(
+            viewModel = viewModel,
+            currentUrl = activeTab?.url ?: "",
+            onBack = { activeScreen = "browser" }
+        )
+    }
+
+    // Chrome-like save password auto-prompt
+    val passwordPromptData by viewModel.passwordSavePrompt.collectAsStateWithLifecycle()
+    if (passwordPromptData != null) {
+        val prompt = passwordPromptData!!
+        var showPasswordInPrompt by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { viewModel.clearPasswordSavePrompt() },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.VpnKey,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Save legacy vault pass?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "The secure manager detected login details entered for:",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    Text(
+                        text = prompt.url,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    OutlinedTextField(
+                        value = prompt.username,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Username") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    )
+
+                    OutlinedTextField(
+                        value = prompt.plainText,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Password") },
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = if (showPasswordInPrompt) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        shape = RoundedCornerShape(8.dp),
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        trailingIcon = {
+                            IconButton(onClick = { showPasswordInPrompt = !showPasswordInPrompt }) {
+                                Icon(
+                                    imageVector = if (showPasswordInPrompt) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Show/hide password",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.savePassword(
+                            websiteUrl = prompt.url,
+                            username = prompt.username,
+                            plainText = prompt.plainText,
+                            label = prompt.url
+                        )
+                        viewModel.clearPasswordSavePrompt()
+                    }
+                ) {
+                    Text("Save to Vault")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.clearPasswordSavePrompt() }
+                ) {
+                    Text("Don't Save")
+                }
+            }
+        )
+    }
+
+    // Standard high-level reliable toast notification engine
+    val contextForToast = LocalContext.current
+    LaunchedEffect(toastMessage) {
+        toastMessage?.let { msg ->
+            android.widget.Toast.makeText(contextForToast, msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    if (showAutofillDialog) {
+        val passwordsList by viewModel.savedPasswords.collectAsStateWithLifecycle()
+        val currentHost = remember(activeTab?.url) {
+            try {
+                android.net.Uri.parse(activeTab?.url ?: "").host ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+        }
+        val currentDomainPasswords = remember(passwordsList, currentHost) {
+            if (currentHost.isBlank()) {
+                emptyList()
+            } else {
+                passwordsList.filter {
+                    it.websiteUrl.contains(currentHost, ignoreCase = true) ||
+                            currentHost.contains(it.websiteUrl, ignoreCase = true)
+                }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showAutofillDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.VpnKey,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text("Secure Web Autofill", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (currentHost.isNotBlank()) {
+                        Text(
+                            text = "Detected Site: $currentHost",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    if (currentDomainPasswords.isEmpty()) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.outlineVariant,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No matching credentials stored.",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        Text("Select credentials block to auto-fill into this login entry:", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 180.dp).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(currentDomainPasswords) { credential ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            activeWebView?.let { webView ->
+                                                val plainText = viewModel.decryptPassword(credential.encryptedPassword)
+                                                val escapeString = { s: String -> s.replace("'", "\\'") }
+                                                val js = """
+                                                    (function() {
+                                                        var userFields = document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]');
+                                                        var passwordFields = document.querySelectorAll('input[type="password"]');
+                                                        
+                                                        var targetUser = '${escapeString(credential.username)}';
+                                                        var targetPass = '${escapeString(plainText)}';
+                                                        
+                                                        var userField = null;
+                                                        for (var i = 0; i < userFields.length; i++) {
+                                                            var f = userFields[i];
+                                                            var name = (f.name || f.id || f.placeholder || f.className || "").toLowerCase();
+                                                            if (name.indexOf('user') !== -1 || name.indexOf('email') !== -1 || name.indexOf('login') !== -1 || name.indexOf('name') !== -1 || name.indexOf('mail') !== -1) {
+                                                                userField = f;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if (!userField && userFields.length > 0) {
+                                                            userField = userFields[0];
+                                                        }
+                                                        if (userField) {
+                                                            userField.value = targetUser;
+                                                            userField.dispatchEvent(new Event('input', { bubbles: true }));
+                                                            userField.dispatchEvent(new Event('change', { bubbles: true }));
+                                                        }
+                                                        if (passwordFields.length > 0) {
+                                                            for (var j = 0; j < passwordFields.length; j++) {
+                                                                passwordFields[j].value = targetPass;
+                                                                passwordFields[j].dispatchEvent(new Event('input', { bubbles: true }));
+                                                                passwordFields[j].dispatchEvent(new Event('change', { bubbles: true }));
+                                                            }
+                                                        }
+                                                    })();
+                                                """.trimIndent()
+                                                webView.evaluateJavascript(js, null)
+                                            }
+                                            viewModel.showToast("Autofill credentials filled.")
+                                            showAutofillDialog = false
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp).fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = credential.labelName.ifEmpty { credential.websiteUrl },
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "User: ${credential.username}",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.outline
+                                            )
+                                        }
+                                        Icon(
+                                            imageVector = Icons.Default.Launch,
+                                            contentDescription = "Autofill",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAutofillDialog = false
+                        activeScreen = "passwords"
+                    }
+                ) {
+                    Text("Open Vault")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAutofillDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     // Tabs Switcher Dialog Sheet
     if (showTabsSheet) {
@@ -758,6 +1180,9 @@ fun BrowserScreen(
     if (showDownloadsSheet) {
         DownloadsSheet(
             downloads = downloads,
+            onDeleteItem = { item ->
+                viewModel.deleteDownload(item.id, item.filePath)
+            },
             onDismiss = { showDownloadsSheet = false }
         )
     }
@@ -1599,7 +2024,8 @@ fun getOrCreateWebView(
     viewModel: BrowserViewModel,
     webViews: MutableMap<String, WebView>,
     onPermissionRequested: (android.webkit.PermissionRequest) -> Unit,
-    onGeolocationRequested: (String, android.webkit.GeolocationPermissions.Callback) -> Unit
+    onGeolocationRequested: (String, android.webkit.GeolocationPermissions.Callback) -> Unit,
+    onShowFileChooser: (android.webkit.ValueCallback<Array<android.net.Uri>>, android.webkit.WebChromeClient.FileChooserParams) -> Unit
 ): WebView {
     val tab = viewModel.tabs.value.find { it.id == tabId }
     val isIncognito = tab?.isIncognito == true
@@ -1631,6 +2057,8 @@ fun getOrCreateWebView(
             if (isIncognito) {
                 clearCache(true)
                 clearHistory()
+            } else {
+                addJavascriptInterface(PasswordCaptureInterface(this, viewModel), "AndroidPasswordManager")
             }
 
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
@@ -1714,6 +2142,77 @@ fun getOrCreateWebView(
                     viewModel.onPageFinished(tabId, view.title ?: "", url)
                     viewModel.updateProgress(tabId, 100, false)
                     viewModel.updateNavigationState(tabId, view.canGoBack(), view.canGoForward())
+
+                    // Inject Password Form Autosave Interceptor JS script
+                    if (!url.startsWith("browser://") && !isIncognito) {
+                        val jsScript = """
+                            (function() {
+                                var grabCredentialsAndSubmit = function(usernameVal, passwordVal) {
+                                    if (usernameVal && passwordVal) {
+                                        AndroidPasswordManager.onPasswordEntered(usernameVal, passwordVal);
+                                    }
+                                };
+                                var checkAndSendForm = function(form) {
+                                    var userFields = form.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]');
+                                    var passwordFields = form.querySelectorAll('input[type="password"]');
+                                    if (passwordFields.length > 0) {
+                                        var pass = passwordFields[0].value;
+                                        var user = '';
+                                        for (var i = 0; i < userFields.length; i++) {
+                                            var name = (userFields[i].name || userFields[i].id || userFields[i].placeholder || "").toLowerCase();
+                                            if (name.indexOf('user') !== -1 || name.indexOf('email') !== -1 || name.indexOf('login') !== -1 || name.indexOf('name') !== -1 || name.indexOf('mail') !== -1) {
+                                                user = userFields[i].value;
+                                                break;
+                                            }
+                                        }
+                                        if (!user && userFields.length > 0) {
+                                            user = userFields[0].value;
+                                        }
+                                        grabCredentialsAndSubmit(user, pass);
+                                    }
+                                };
+                                var forms = document.forms;
+                                for (var i = 0; i < forms.length; i++) {
+                                    (function(f) {
+                                        f.addEventListener('submit', function() {
+                                            checkAndSendForm(f);
+                                        });
+                                    })(forms[i]);
+                                }
+                                var submitButtons = document.querySelectorAll('button[type="submit"], input[type="submit"], button[id*="login"i], button[class*="login"i], a[id*="login"i], a[class*="login"i], button[id*="signin"i], button[class*="signin"i]');
+                                for (var j = 0; j < submitButtons.length; j++) {
+                                    submitButtons[j].addEventListener('click', function() {
+                                        var btn = this;
+                                        setTimeout(function() {
+                                            var form = btn.closest('form');
+                                            if (form) {
+                                                checkAndSendForm(form);
+                                            } else {
+                                                var userFields = document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]');
+                                                var passwordFields = document.querySelectorAll('input[type="password"]');
+                                                if (passwordFields.length > 0) {
+                                                    var pass = passwordFields[0].value;
+                                                    var user = '';
+                                                    for (var i = 0; i < userFields.length; i++) {
+                                                        var name = (userFields[i].name || userFields[i].id || userFields[i].placeholder || "").toLowerCase();
+                                                        if (name.indexOf('user') !== -1 || name.indexOf('email') !== -1 || name.indexOf('login') !== -1 || name.indexOf('name') !== -1 || name.indexOf('mail') !== -1) {
+                                                            user = userFields[i].value;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (!user && userFields.length > 0) {
+                                                        user = userFields[0].value;
+                                                    }
+                                                    grabCredentialsAndSubmit(user, pass);
+                                                }
+                                            }
+                                        }, 100);
+                                    });
+                                }
+                            })();
+                        """.trimIndent()
+                        view.evaluateJavascript(jsScript, null)
+                    }
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
@@ -1762,6 +2261,20 @@ fun getOrCreateWebView(
                         super.onGeolocationPermissionsShowPrompt(origin, callback)
                     }
                 }
+
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    if (filePathCallback != null && fileChooserParams != null) {
+                        this@apply.post {
+                            onShowFileChooser(filePathCallback, fileChooserParams)
+                        }
+                        return true
+                    }
+                    return super.onShowFileChooser(webView, filePathCallback, fileChooserParams)
+                }
             }
 
             // Load initial page if it's a real web URL
@@ -1772,12 +2285,98 @@ fun getOrCreateWebView(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+class PasswordCaptureInterface(
+    private val webView: WebView,
+    private val viewModel: BrowserViewModel
+) {
+    @android.webkit.JavascriptInterface
+    fun onPasswordEntered(username: String, pass: String) {
+        webView.post {
+            val url = webView.url ?: ""
+            if (url.isNotBlank() && !url.startsWith("browser://")) {
+                viewModel.triggerPasswordSavePrompt(url, username, pass)
+            }
+        }
+    }
+}
+
+// Utility function to open downloaded files on Android safely through FileProvider
+fun openDownloadedFile(context: android.content.Context, item: DownloadItem) {
+    if (item.filePath.isEmpty()) {
+        android.widget.Toast.makeText(context, "No local path found for this download.", android.widget.Toast.LENGTH_SHORT).show()
+        return
+    }
+    val file = java.io.File(item.filePath)
+    if (!file.exists()) {
+        android.widget.Toast.makeText(context, "File does not exist or was deleted from storage.", android.widget.Toast.LENGTH_LONG).show()
+        return
+    }
+
+    try {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "com.mtos.web.browser.fileprovider",
+            file
+        )
+        val extension = android.webkit.MimeTypeMap.getFileExtensionFromUrl(android.net.Uri.fromFile(file).toString())
+        val mimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase()) ?: "*/*"
+
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        android.util.Log.e("DownloadsSheet", "Failed parsing / opening with FileProvider", e)
+        try {
+            // Standard backup intent
+            val genericIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                val uri = android.net.Uri.fromFile(file)
+                setDataAndType(uri, "*/*")
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(genericIntent)
+        } catch (ex: Exception) {
+            android.widget.Toast.makeText(context, "No app available to open this file.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun DownloadsSheet(
     downloads: List<DownloadItem>,
+    onDeleteItem: (DownloadItem) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    var selectedItemForDeletion by remember { mutableStateOf<DownloadItem?>(null) }
+
+    // Delete confirmation dialog
+    selectedItemForDeletion?.let { item ->
+        AlertDialog(
+            onDismissRequest = { selectedItemForDeletion = null },
+            title = { Text("Delete Download?") },
+            text = { Text("Are you sure you want to delete '${item.fileName}'? This will permanently delete it from active items and remove its physical file from storage.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteItem(item)
+                        selectedItemForDeletion = null
+                    }
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedItemForDeletion = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -1827,7 +2426,20 @@ fun DownloadsSheet(
                 ) {
                     items(downloads.reversed(), key = { it.id }) { item ->
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        if (item.isCompleted) {
+                                            openDownloadedFile(context, item)
+                                        } else {
+                                            android.widget.Toast.makeText(context, "Please wait, downloading in progress...", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onLongClick = {
+                                        selectedItemForDeletion = item
+                                    }
+                                ),
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                             )
@@ -1872,7 +2484,7 @@ fun DownloadsSheet(
                                     )
                                     if (item.isCompleted) {
                                         Text(
-                                            text = "Completed",
+                                            text = "Completed (Tap to Open)",
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                             color = Color(0xFF4CAF50)
                                         )
@@ -1911,6 +2523,7 @@ fun AppPermissionsSheet(
     var hasCamera by remember { mutableStateOf(false) }
     var hasMic by remember { mutableStateOf(false) }
     var hasLocation by remember { mutableStateOf(false) }
+    var hasMedia by remember { mutableStateOf(false) }
 
     fun checkPermissions() {
         hasCamera = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -1924,6 +2537,16 @@ fun AppPermissionsSheet(
         hasLocation = androidx.core.content.ContextCompat.checkSelfPermission(
             context, android.Manifest.permission.ACCESS_FINE_LOCATION
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasMedia = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_MEDIA_IMAGES
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -1955,7 +2578,7 @@ fun AppPermissionsSheet(
             )
 
             Text(
-                text = "These system-level permissions enable advanced capabilities such as video calls, audio recordings (WebRTC), and geolocations inside trust-worthy websites.",
+                text = "These system-level permissions enable advanced capabilities such as video calls, audio recordings (WebRTC), geolocations, and secure download folders inside trust-worthy websites.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 24.dp)
@@ -1998,6 +2621,33 @@ fun AppPermissionsSheet(
                                 android.Manifest.permission.ACCESS_COARSE_LOCATION
                             )
                         )
+                    }
+                )
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                PermissionStatusRow(
+                    title = "Media & Storage Access",
+                    description = "Required to download files permanently and read media files for upload picking.",
+                    isGranted = hasMedia,
+                    icon = Icons.Default.Folder,
+                    onRequestValue = {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                            launcher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.READ_MEDIA_IMAGES,
+                                    android.Manifest.permission.READ_MEDIA_VIDEO,
+                                    android.Manifest.permission.READ_MEDIA_AUDIO
+                                )
+                            )
+                        } else {
+                            launcher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                                )
+                            )
+                        }
                     }
                 )
             }
@@ -2675,6 +3325,7 @@ fun SiteInfoSheet(
 ) {
     val context = LocalContext.current
     var currentView by remember { mutableStateOf("main") } // "main", "connection", "cookies"
+    var isDeleted by remember { mutableStateOf(false) }
 
     // Parse the domain and basic attributes
     val uri = remember(url) {
@@ -2837,7 +3488,7 @@ fun SiteInfoSheet(
                                 },
                                 supportingContent = {
                                     Text(
-                                        text = if (isHome || cookieBytes == 0) "No cookies or data cached" else "Calculated Size: $formattedSize",
+                                        text = if (isDeleted || isHome || cookieBytes == 0) "No cookies or data cached" else "Calculated Size: $formattedSize",
                                         style = MaterialTheme.typography.bodyMedium
                                     )
                                 },
@@ -3043,145 +3694,1165 @@ fun SiteInfoSheet(
                             onClick = { currentView = "main" },
                             modifier = Modifier.testTag("cookies_back_button")
                         ) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Back back to site information")
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Back back to site information",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                         Text(
-                            text = "Cookies & Site Data",
+                            text = "Cookies and site data",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.padding(start = 8.dp)
                         )
                     }
 
-                    // Info and Statistics Card
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                        ),
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "Site Storage Calculation",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(bottom = 6.dp)
-                            )
-                            Text(
-                                text = "Under Android privacy policies, cookie keys and raw cookie identifiers are screened. Instead, we compute the verified disk check footprint of active web content cookies and index cache.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(bottom = 16.dp)
-                            )
-
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            // Display cookie count
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Total Cookie Keys", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("$cookieCount keys", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                            }
-
-                            // Display raw cookie size directly in MB
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Cookies Footprint", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(formattedRawCookieSize, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
-                            }
-
-                            // Display associated site cache/database storage
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Site Storage & Cache", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(
-                                    text = if (cookieBytes <= 0) "0.00 MB" else {
-                                        val cacheBytes = cookieBytes * 1024L + (domain.hashCode().toLong() % 500000L).coerceAtLeast(20000L) - cookieBytes
-                                        val mb = cacheBytes.toDouble() / (1024.0 * 1024.0)
-                                        String.format(java.util.Locale.US, "%.2f MB", mb)
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold
+                    // Explanatory description text matching standard Chrome behavior
+                    Text(
+                        text = androidx.compose.ui.text.buildAnnotatedString {
+                            append("Cookies and other site data are used to remember you, for example to sign you in or to personalize ads. To manage cookies for all sites, see ")
+                            pushStyle(
+                                androidx.compose.ui.text.SpanStyle(
+                                    color = Color(0xFF0F9D58), // Chrome-like green/teal color
+                                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+                                    fontWeight = FontWeight.Medium
                                 )
-                            }
+                            )
+                            append("Settings")
+                            pop()
+                            append(".")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 24.dp)
+                    )
 
-                            Spacer(modifier = Modifier.height(8.dp))
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                            Spacer(modifier = Modifier.height(12.dp))
+                    // Display active site storage row with Database cylinder icon and Trash icon on the right
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Storage,
+                                contentDescription = "Storage icon",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Text(
+                                text = if (isDeleted || isHome || cookieBytes == 0) "0.00 MB stored data" else "$formattedSize stored data",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
 
-                            // Display total checked size in MB/GB
+                        IconButton(
+                            onClick = {
+                                try {
+                                    isDeleted = true
+                                    cookieManager.setCookie(url, "")
+                                    cookieManager.removeAllCookies {
+                                        cookieManager.flush()
+                                        onReload()
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("SiteInfoSheet", "Error during clear operations", e)
+                                    onReload()
+                                }
+                            },
+                            modifier = Modifier.testTag("delete_cookies_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete site cookies and data",
+                                tint = Color(0xFF0F9D58), // Chrome-like green/teal color
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun FullDownloadsScreen(
+    downloads: List<DownloadItem>,
+    onDeleteItem: (DownloadItem) -> Unit,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    var selectedItemForDeletion by remember { mutableStateOf<DownloadItem?>(null) }
+
+    // Delete confirmation dialog
+    selectedItemForDeletion?.let { item ->
+        AlertDialog(
+            onDismissRequest = { selectedItemForDeletion = null },
+            title = { Text("Delete Download?") },
+            text = { Text("Are you sure you want to delete '${item.fileName}'? This will permanently delete it from active items and remove its physical file from storage.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteItem(item)
+                        selectedItemForDeletion = null
+                    }
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedItemForDeletion = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Downloads", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back back to browser")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
+        ) {
+            if (downloads.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(72.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "No saved downloads",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Files you download will be saved here permanently.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(downloads.reversed(), key = { it.id }) { item ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        if (item.isCompleted) {
+                                            openDownloadedFile(context, item)
+                                        } else {
+                                            android.widget.Toast.makeText(context, "Please wait, downloading in progress...", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onLongClick = {
+                                        selectedItemForDeletion = item
+                                    }
+                                ),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            )
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "Total Checked Storage",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(
+                                            color = if (item.isCompleted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+                                            shape = CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (item.isCompleted) Icons.Default.CheckCircle else Icons.Default.Refresh,
+                                        contentDescription = null,
+                                        tint = if (item.isCompleted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(16.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.fileName,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Size: ${item.size}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (item.isCompleted) {
+                                        Text(
+                                            text = "Completed (Tap to Open)",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = Color(0xFF4CAF50)
+                                        )
+                                    } else {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        LinearProgressIndicator(
+                                            progress = { item.progress },
+                                            modifier = Modifier.fillMaxWidth().height(6.dp),
+                                            color = MaterialTheme.colorScheme.primary,
+                                            trackColor = MaterialTheme.colorScheme.primaryContainer
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "Downloading... ${Math.round(item.progress * 100)}%",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                }
+
+                                IconButton(onClick = { selectedItemForDeletion = item }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete download",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FullBookmarksScreen(
+    bookmarks: List<Bookmark>,
+    onUrlClicked: (String) -> Unit,
+    onBookmarkDeleteRequested: (Bookmark) -> Unit,
+    onBack: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Bookmarks", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to browser")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
+        ) {
+            if (bookmarks.isEmpty()) {
+                LibraryEmptyState(
+                    title = "No Bookmarks Yet",
+                    tagline = "Tap the Star icon in the address toolbar to save your favorite sites here!"
+                )
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize().padding(top = 8.dp)
+                ) {
+                    items(bookmarks) { item ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onUrlClicked(item.url) }
+                                .testTag("bookmark_item"),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFFD700),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.title,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = item.url,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                IconButton(onClick = { onBookmarkDeleteRequested(item) }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete bookmark",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FullHistoryScreen(
+    history: List<HistoryItem>,
+    onUrlClicked: (String) -> Unit,
+    onHistoryDeleteRequested: (Int) -> Unit,
+    onClearHistory: () -> Unit,
+    onBack: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Browsing History", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to browser")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
+        ) {
+            if (history.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        onClick = onClearHistory,
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier.testTag("clear_history_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Clear All History")
+                    }
+                }
+            }
+
+            if (history.isEmpty()) {
+                LibraryEmptyState(
+                    title = "Browsing History is Blank",
+                    tagline = "Websites you explore will be safely cataloged here."
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(history) { item ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onUrlClicked(item.url) }
+                                .testTag("history_item"),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                            shape = CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.title,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = item.url,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                IconButton(onClick = { onHistoryDeleteRequested(item.id) }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete history",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FullPermissionsScreen(
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // System Permissions States
+    var hasCamera by remember { mutableStateOf(false) }
+    var hasMic by remember { mutableStateOf(false) }
+    var hasLocation by remember { mutableStateOf(false) }
+    var hasMedia by remember { mutableStateOf(false) }
+
+    fun checkPermissions() {
+        hasCamera = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasLocation = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        hasMedia = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_MEDIA_IMAGES
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        checkPermissions()
+    }
+
+    val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        checkPermissions()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("App Permissions", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to browser")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = "Browser Capabilities & Permissions",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                Text(
+                    text = "These system-level permissions enable advanced capabilities such as video calls, audio recordings (WebRTC), geolocations, and secure download folders inside trust-worthy websites.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 24.dp)
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    PermissionStatusRow(
+                        title = "Camera Access",
+                        description = "Used for web camera, image uploads, and virtual environments.",
+                        isGranted = hasCamera,
+                        icon = Icons.Default.Camera,
+                        onRequestValue = {
+                            launcher.launch(arrayOf(android.Manifest.permission.CAMERA))
+                        }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    PermissionStatusRow(
+                        title = "Microphone Access",
+                        description = "Used for voice speech recognition, audio notes, and sound effects.",
+                        isGranted = hasMic,
+                        icon = Icons.Default.Mic,
+                        onRequestValue = {
+                            launcher.launch(arrayOf(android.Manifest.permission.RECORD_AUDIO))
+                        }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    PermissionStatusRow(
+                        title = "Location Access",
+                        description = "Shared with maps, weather, and localized web lookup search engines.",
+                        isGranted = hasLocation,
+                        icon = Icons.Default.LocationOn,
+                        onRequestValue = {
+                            launcher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                                    android.Manifest.permission.ACCESS_COARSE_LOCATION
                                 )
+                            )
+                        }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    PermissionStatusRow(
+                        title = "Media & Storage Access",
+                        description = "Required to download files permanently and read media files for upload picking.",
+                        isGranted = hasMedia,
+                        icon = Icons.Default.Folder,
+                        onRequestValue = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                launcher.launch(
+                                    arrayOf(
+                                        android.Manifest.permission.READ_MEDIA_IMAGES,
+                                        android.Manifest.permission.READ_MEDIA_VIDEO,
+                                        android.Manifest.permission.READ_MEDIA_AUDIO
+                                    )
+                                )
+                            } else {
+                                launcher.launch(
+                                    arrayOf(
+                                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                                    )
+                                )
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FullSyncScreen(
+    viewModel: BrowserViewModel,
+    onBack: () -> Unit
+) {
+    // Cloud Sync States
+    val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
+    val lastSyncTime by viewModel.lastSyncTime.collectAsStateWithLifecycle()
+
+    val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+    val history by viewModel.history.collectAsStateWithLifecycle()
+
+    var showGoogleChooser by remember { mutableStateOf(false) }
+
+    // Forms fields
+    var signupLoginTab by remember { mutableStateOf(0) } // 0 = Login, 1 = Signup
+    var emailText by remember { mutableStateOf("") }
+    var passwordText by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var nameText by remember { mutableStateOf("") }
+    var authError by remember { mutableStateOf<String?>(null) }
+
+    // Sync options toggles
+    var syncBookmarks by remember { mutableStateOf(true) }
+    var syncHistory by remember { mutableStateOf(true) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Cloud Sync & Account", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back to browser")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (currentUser == null) {
+                    Text(
+                        text = "Sync & Browser Account",
+                        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    Text(
+                        text = "Sign in to synchronize your bookmarks, browsing history, and open tabs securely in the cloud.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 20.dp)
+                    )
+
+                    // Login / Signup tabs
+                    TabRow(
+                        selectedTabIndex = signupLoginTab,
+                        containerColor = Color.Transparent,
+                        modifier = Modifier.padding(bottom = 20.dp)
+                    ) {
+                        Tab(
+                            selected = signupLoginTab == 0,
+                            onClick = {  
+                                signupLoginTab = 0
+                                authError = null
+                            },
+                            text = { Text("Sign In", fontWeight = FontWeight.Bold) }
+                        )
+                        Tab(
+                            selected = signupLoginTab == 1,
+                            onClick = {  
+                                signupLoginTab = 1
+                                authError = null
+                            },
+                            text = { Text("Create Account", fontWeight = FontWeight.Bold) }
+                        )
+                    }
+
+                    if (authError != null) {
+                        Text(
+                            text = authError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                    }
+
+                    if (signupLoginTab == 1) {
+                        OutlinedTextField(
+                            value = nameText,
+                            onValueChange = { nameText = it },
+                            label = { Text("Display Name") },
+                            leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = emailText,
+                        onValueChange = { emailText = it },
+                        label = { Text("Email Address") },
+                        leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
+                    )
+
+                    OutlinedTextField(
+                        value = passwordText,
+                        onValueChange = { passwordText = it },
+                        label = { Text("Password (6+ chars)") },
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        trailingIcon = {
+                            val image = if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff
+                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Icon(imageVector = image, contentDescription = "Toggle password visibility")
+                            }
+                        },
+                        visualTransformation = if (passwordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation()
+                    )
+
+                    Button(
+                        onClick = {
+                            if (emailText.isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(emailText.trim()).matches()) {
+                                authError = "Please enter a valid email address."
+                                return@Button
+                            }
+                            if (passwordText.length < 6) {
+                                authError = "Password must be at least 6 characters."
+                                return@Button
+                            }
+
+                            if (signupLoginTab == 1) {
+                                if (nameText.isBlank()) {
+                                    authError = "Please enter your display name."
+                                    return@Button
+                                }
+                                val registered = viewModel.registerUser(emailText, nameText, passwordText)
+                                if (registered) {
+                                    viewModel.loginUser(emailText, passwordText)
+                                    authError = null
+                                } else {
+                                    authError = "This email is already registered."
+                                }
+                            } else {
+                                val loggedIn = viewModel.loginUser(emailText, passwordText)
+                                if (loggedIn) {
+                                    authError = null
+                                } else {
+                                    authError = "Invalid email or password."
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (signupLoginTab == 0) "Sign In" else "Create Account",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        Text(
+                            text = "OR",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedCard(
+                        onClick = { showGoogleChooser = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(modifier = Modifier.size(20.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("G", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, fontSize = 18.sp), color = Color(0xFF4285F4))
+                                Text("o", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, fontSize = 18.sp), color = Color(0xFFEA4335))
+                                Text("o", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, fontSize = 18.sp), color = Color(0xFFFBBC05))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Continue with Google",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                } else {
+                    val profile = currentUser!!
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(bottom = 20.dp)
+                    ) {
+                        val initials = profile.displayName.take(2).uppercase()
+                        Box(
+                            modifier = Modifier
+                                .size(54.dp)
+                                .background(
+                                    brush = Brush.linearGradient(
+                                        colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.tertiary)
+                                    ),
+                                    shape = CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = initials,
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = Color.White
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = profile.displayName,
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = profile.email,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (profile.provider == "Google") Icons.Default.Launch else Icons.Default.Email,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = formattedSize,
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold,
+                                    text = "Signed in with ${profile.provider}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
                     }
 
-                    // Cookie operations row buttons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                        ),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
-                        OutlinedButton(
-                            onClick = { currentView = "main" },
-                            modifier = Modifier.weight(1f).testTag("cookies_back_to_main")
-                        ) {
-                            Text("Back")
-                        }
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "Sync Panel & Status",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
 
-                        Button(
-                            onClick = {
-                                try {
-                                    // Remove cookie references
-                                    cookieManager.setCookie(url, "")
-                                    cookieManager.removeAllCookies {
-                                        cookieManager.flush()
-                                        onReload()
-                                        onDismiss()
-                                    }
-                                } catch (e: Exception) {
-                                    android.util.Log.e("SiteInfoSheet", "Error during clear operations", e)
-                                    onReload()
-                                    onDismiss()
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = if (isSyncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                val syncStatusText = if (isSyncing) {
+                                    "Synchronizing data..."
+                                } else if (lastSyncTime != null) {
+                                    val format = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                    "Synced successfully at ${format.format(java.util.Date(lastSyncTime!!))}"
+                                } else {
+                                    "Synced: Never (Tap Sync to backup)"
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error,
-                                contentColor = MaterialTheme.colorScheme.onError
-                            ),
-                            modifier = Modifier.weight(1.3f).testTag("delete_cookies_button")
-                        ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete Icon", modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Delete Cookies", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    text = syncStatusText,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                    color = if (isSyncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            if (isSyncing) {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).height(4.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.primaryContainer
+                                )
+                            }
+
+                            Text(
+                                text = "Select Data to Sync",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                modifier = Modifier.padding(bottom = 8.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            ListItem(
+                                headlineContent = { Text("Bookmarks (${bookmarks.size} items)") },
+                                trailingContent = {
+                                    Switch(checked = syncBookmarks, onCheckedChange = { syncBookmarks = it })
+                                },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                modifier = Modifier.padding(0.dp)
+                            )
+                            ListItem(
+                                headlineContent = { Text("Browsing History (${history.size} items)") },
+                                trailingContent = {
+                                    Switch(checked = syncHistory, onCheckedChange = { syncHistory = it })
+                                },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                modifier = Modifier.padding(0.dp)
+                            )
                         }
+                    }
+
+                    Button(
+                        onClick = { viewModel.triggerDataSync() },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        enabled = !isSyncing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sync,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Sync Now",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.logout()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Logout,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Sign Out & Stop Sync",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                        )
                     }
                 }
             }
         }
+    }
+
+    if (showGoogleChooser) {
+        AlertDialog(
+            onDismissRequest = { showGoogleChooser = false },
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.size(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("G", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFF4285F4))
+                        Text("o", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFFEA4335))
+                        Text("o", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = Color(0xFFFBBC05))
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Choose a Google Account",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Select an account to sync with Google Cloud Sync:",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    listOf(
+                        "salmanmohdahmad567@gmail.com" to "Salman Ahmad",
+                        "test.user@gmail.com" to "Test User"
+                    ).forEach { (email, name) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.selectUser(email = email, name = name, provider = "Google", avatar = null)
+                                    showGoogleChooser = false
+                                }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = name.take(1).uppercase(),
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(text = name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
+                                Text(text = email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showGoogleChooser = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

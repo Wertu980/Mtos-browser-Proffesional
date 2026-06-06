@@ -31,6 +31,7 @@ data class DownloadItem(
     val size: String,
     val progress: Float, // 0.0 to 1.0
     val isCompleted: Boolean,
+    val filePath: String = "",
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -40,6 +41,12 @@ data class UserProfile(
     val provider: String,
     val avatarUrl: String? = null,
     val joinedTimestamp: Long = System.currentTimeMillis()
+)
+
+data class PasswordSavePromptState(
+    val url: String,
+    val username: String,
+    val plainText: String
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
@@ -79,9 +86,93 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
 
-    // Download & Notification States
-    private val _downloads = MutableStateFlow<List<DownloadItem>>(emptyList())
-    val downloads: StateFlow<List<DownloadItem>> = _downloads.asStateFlow()
+    // Download & Notification States backed by Room Database
+    val downloads: StateFlow<List<DownloadItem>> = repository.allDownloads
+        .map { entityList ->
+            entityList.map { entity ->
+                DownloadItem(
+                    id = entity.id,
+                    fileName = entity.fileName,
+                    url = entity.url,
+                    size = entity.size,
+                    progress = entity.progress,
+                    isCompleted = entity.isCompleted,
+                    filePath = entity.filePath,
+                    timestamp = entity.timestamp
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val savedPasswords: StateFlow<List<PasswordCredential>> = repository.allPasswords
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _passwordSavePrompt = MutableStateFlow<PasswordSavePromptState?>(null)
+    val passwordSavePrompt: StateFlow<PasswordSavePromptState?> = _passwordSavePrompt.asStateFlow()
+
+    fun triggerPasswordSavePrompt(url: String, username: String, plainText: String) {
+        viewModelScope.launch {
+            if (username.isBlank() || plainText.isBlank() || url.isBlank()) return@launch
+            // Standardize URL to clean host domain format
+            val cleanUrl = try {
+                val uri = android.net.Uri.parse(url)
+                uri.host ?: url
+            } catch (e: Exception) {
+                url
+            }
+            val currentList = savedPasswords.value
+            val alreadyExists = currentList.any { credential ->
+                credential.websiteUrl.contains(cleanUrl, ignoreCase = true) &&
+                        credential.username.equals(username, ignoreCase = true)
+            }
+            if (!alreadyExists) {
+                _passwordSavePrompt.value = PasswordSavePromptState(cleanUrl, username, plainText)
+            }
+        }
+    }
+
+    fun clearPasswordSavePrompt() {
+        _passwordSavePrompt.value = null
+    }
+
+    fun savePassword(websiteUrl: String, username: String, plainText: String, label: String = "") {
+        viewModelScope.launch {
+            val encrypted = CryptographyHelper.encrypt(plainText)
+            val credential = PasswordCredential(
+                websiteUrl = websiteUrl.trim(),
+                username = username.trim(),
+                encryptedPassword = encrypted,
+                labelName = label.trim()
+            )
+            repository.insertPassword(credential)
+            showToast("Credential saved securely.")
+        }
+    }
+
+    fun deletePassword(credential: PasswordCredential) {
+        viewModelScope.launch {
+            repository.deletePassword(credential)
+            showToast("Credential removed.")
+        }
+    }
+
+    fun deletePasswordById(id: Int) {
+        viewModelScope.launch {
+            repository.deletePasswordById(id)
+            showToast("Credential removed.")
+        }
+    }
+
+    fun decryptPassword(encrypted: String): String {
+        return CryptographyHelper.decrypt(encrypted)
+    }
+
+    fun analyzeCredentialWithAI(password: String, username: String, url: String, onCompleted: (String) -> Unit) {
+        viewModelScope.launch {
+            val analysis = GeminiHelper.evaluatePasswordSecurity(password, username, url)
+            onCompleted(analysis)
+        }
+    }
 
     private val _toastMessage = MutableStateFlow<String?>(null)
     val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
@@ -337,15 +428,22 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun startDownload(context: android.content.Context, url: String, fileName: String, sizeText: String) {
         val downloadId = java.util.UUID.randomUUID().toString()
-        val newDownload = DownloadItem(
+        val publicDownloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+        val file = java.io.File(publicDownloadsDir, fileName)
+        val actualFilePath = file.absolutePath
+
+        val initialDownload = DownloadEntity(
             id = downloadId,
             fileName = fileName,
             url = url,
             size = sizeText,
             progress = 0f,
-            isCompleted = false
+            isCompleted = false,
+            filePath = actualFilePath
         )
-        _downloads.update { it + newDownload }
+        viewModelScope.launch {
+            repository.insertDownload(initialDownload)
+        }
         showToast("Started downloading $fileName...")
 
         try {
@@ -379,16 +477,17 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                             val status = cursor.getInt(statusCol)
 
                             val progress = if (totalBytes > 0) (bytesDownloaded.toFloat() / totalBytes) else 0f
-                            _downloads.update { list ->
-                                list.map {
-                                    if (it.id == downloadId) {
-                                        it.copy(
-                                            progress = progress,
-                                            isCompleted = status == android.app.DownloadManager.STATUS_SUCCESSFUL
-                                        )
-                                    } else it
-                                }
-                            }
+                            
+                            val updatedDownload = DownloadEntity(
+                                id = downloadId,
+                                fileName = fileName,
+                                url = url,
+                                size = sizeText,
+                                progress = progress,
+                                isCompleted = status == android.app.DownloadManager.STATUS_SUCCESSFUL,
+                                filePath = actualFilePath
+                            )
+                            repository.insertDownload(updatedDownload)
 
                             if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
                                 completed = true
@@ -409,6 +508,24 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             android.util.Log.e("BrowserViewModel", "Failed to enqueue download", e)
             showToast("Failed to start download.")
+        }
+    }
+
+    fun deleteDownload(id: String, filePath: String) {
+        viewModelScope.launch {
+            try {
+                repository.deleteDownload(id)
+                if (filePath.isNotEmpty()) {
+                    val file = java.io.File(filePath)
+                    if (file.exists()) {
+                        file.delete()
+                    }
+                }
+                showToast("Download deleted successfully")
+            } catch (e: Exception) {
+                android.util.Log.e("BrowserViewModel", "Failed to delete download", e)
+                showToast("Failed to delete download")
+            }
         }
     }
 

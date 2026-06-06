@@ -29,3 +29,27 @@ data class TabEntity(
     val displayOrder: Int
 )
 
+@Entity(tableName = "downloads")
+data class DownloadEntity(
+    @PrimaryKey val id: String,
+    val fileName: String,
+    val url: String,
+    val size: String,
+    val progress: Float,
+    val isCompleted: Boolean,
+    val filePath: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "password_credentials")
+data class PasswordCredential(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val websiteUrl: String,
+    val username: String,
+    val encryptedPassword: String,
+    val labelName: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+
+

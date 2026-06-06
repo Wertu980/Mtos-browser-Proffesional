@@ -53,4 +53,34 @@ class BrowserRepository(database: AppDatabase) {
     suspend fun clearHistory() {
         historyDao.clearAllHistory()
     }
+
+    private val downloadDao = database.downloadDao()
+    val allDownloads: Flow<List<DownloadEntity>> = downloadDao.getAllDownloads()
+
+    suspend fun insertDownload(download: DownloadEntity) {
+        downloadDao.insertDownload(download)
+    }
+
+    suspend fun deleteDownload(id: String) {
+        downloadDao.deleteDownloadById(id)
+    }
+
+    suspend fun clearAllDownloads() {
+        downloadDao.clearAllDownloads()
+    }
+
+    private val passwordDao = database.passwordDao()
+    val allPasswords: Flow<List<PasswordCredential>> = passwordDao.getAllPasswords()
+
+    suspend fun insertPassword(credential: PasswordCredential) {
+        passwordDao.insertPassword(credential)
+    }
+
+    suspend fun deletePassword(credential: PasswordCredential) {
+        passwordDao.deletePassword(credential)
+    }
+
+    suspend fun deletePasswordById(id: Int) {
+        passwordDao.deletePasswordById(id)
+    }
 }
