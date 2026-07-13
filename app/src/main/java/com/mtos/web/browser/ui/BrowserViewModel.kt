@@ -426,17 +426,52 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         persistTabsState()
     }
 
-    fun startDownload(context: android.content.Context, url: String, fileName: String, sizeText: String) {
+    fun startDownload(
+        context: android.content.Context,
+        url: String,
+        fileName: String,
+        sizeText: String,
+        mimetype: String = "",
+        contentDisposition: String = "",
+        userAgent: String = ""
+    ) {
         val downloadId = java.util.UUID.randomUUID().toString()
+
+        // Handle Base64 / Data URLs
+        if (url.startsWith("data:")) {
+            downloadBase64Data(context, url, fileName, mimetype, downloadId)
+            return
+        }
+
+        // Standardize file name extension if needed
+        var finalFileName = fileName
+        var finalMimeType = mimetype
+        if (finalMimeType.isEmpty()) {
+            val extension = android.webkit.MimeTypeMap.getFileExtensionFromUrl(url.lowercase())
+            if (extension.isNotEmpty()) {
+                finalMimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: ""
+            }
+        }
+        
+        if (finalMimeType.isNotEmpty() && !finalFileName.contains(".")) {
+            val extensionToUse = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(finalMimeType)
+            if (!extensionToUse.isNullOrEmpty()) {
+                finalFileName = "$finalFileName.$extensionToUse"
+            }
+        }
+
         val publicDownloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-        val file = java.io.File(publicDownloadsDir, fileName)
+        if (!publicDownloadsDir.exists()) {
+            publicDownloadsDir.mkdirs()
+        }
+        val file = java.io.File(publicDownloadsDir, finalFileName)
         val actualFilePath = file.absolutePath
 
         val initialDownload = DownloadEntity(
             id = downloadId,
-            fileName = fileName,
+            fileName = finalFileName,
             url = url,
-            size = sizeText,
+            size = sizeText.ifEmpty { "Calculating..." },
             progress = 0f,
             isCompleted = false,
             filePath = actualFilePath
@@ -444,70 +479,191 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             repository.insertDownload(initialDownload)
         }
-        showToast("Started downloading $fileName...")
+        showToast("Starting download: $finalFileName")
 
-        try {
-            val downloadManager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
-            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
-                setMimeType(android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
-                    android.webkit.MimeTypeMap.getFileExtensionFromUrl(url)
-                ))
-                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setTitle(fileName)
-                setDescription("Downloading $fileName via Web Browser")
-                setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, fileName)
-            }
-            val id = downloadManager.enqueue(request)
-            showDownloadNotification(context, fileName, "Downloading (0%)...")
+        // Multi-threaded Coroutine Network Fetch with Cookie & UserAgent preservation
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var connection: java.net.HttpURLConnection? = null
+            var inputStream: java.io.InputStream? = null
+            var outputStream: java.io.FileOutputStream? = null
+            try {
+                val urlObj = java.net.URL(url)
+                connection = urlObj.openConnection() as java.net.HttpURLConnection
+                
+                // Add Session Cookies
+                val cookieManager = android.webkit.CookieManager.getInstance()
+                val cookies = cookieManager.getCookie(url)
+                if (!cookies.isNullOrEmpty()) {
+                    connection.setRequestProperty("Cookie", cookies)
+                }
 
-            viewModelScope.launch {
-                var completed = false
-                while (!completed) {
-                    kotlinx.coroutines.delay(1000)
-                    val query = android.app.DownloadManager.Query().setFilterById(id)
-                    val cursor = downloadManager.query(query)
-                    if (cursor != null && cursor.moveToFirst()) {
-                        val bytesDownloadedCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
-                        val totalBytesCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
-                        val statusCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_STATUS)
+                // Add User-Agent headers
+                if (userAgent.isNotEmpty()) {
+                    connection.setRequestProperty("User-Agent", userAgent)
+                } else {
+                    connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+                }
+                
+                connection.connectTimeout = 20000
+                connection.readTimeout = 20000
+                connection.instanceFollowRedirects = true
 
-                        if (bytesDownloadedCol != -1 && totalBytesCol != -1 && statusCol != -1) {
-                            val bytesDownloaded = cursor.getInt(bytesDownloadedCol)
-                            val totalBytes = cursor.getInt(totalBytesCol)
-                            val status = cursor.getInt(statusCol)
+                val responseCode = connection.responseCode
+                if (responseCode !in 200..299) {
+                    throw java.io.IOException("Server returned HTTP response error status: $responseCode")
+                }
 
-                            val progress = if (totalBytes > 0) (bytesDownloaded.toFloat() / totalBytes) else 0f
-                            
-                            val updatedDownload = DownloadEntity(
-                                id = downloadId,
-                                fileName = fileName,
-                                url = url,
-                                size = sizeText,
-                                progress = progress,
-                                isCompleted = status == android.app.DownloadManager.STATUS_SUCCESSFUL,
-                                filePath = actualFilePath
-                            )
-                            repository.insertDownload(updatedDownload)
+                val contentLength = connection.contentLength
+                var readableSize = sizeText
+                if (contentLength > 0) {
+                    val kb = contentLength / 1024
+                    readableSize = if (kb > 1024) "${kb / 1024} MB" else "$kb KB"
+                } else if (readableSize.isEmpty() || readableSize == "Calculating...") {
+                    readableSize = "Unknown size"
+                }
 
-                            if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
-                                completed = true
-                                showToast("Download completed: $fileName")
-                                showDownloadNotification(context, fileName, "Download completed successfully!")
-                            } else if (status == android.app.DownloadManager.STATUS_FAILED) {
-                                completed = true
-                                showToast("Download failed: $fileName")
-                                showDownloadNotification(context, fileName, "Download failed.")
-                            }
-                        }
-                    } else {
-                        completed = true
+                inputStream = connection.inputStream
+                outputStream = java.io.FileOutputStream(file)
+
+                val buffer = ByteArray(8192)
+                var bytesRead: Int
+                var totalBytesRead = 0L
+                var lastProgressUpdate = 0L
+
+                // Spawn status bar progress indicator
+                showDownloadNotification(context, finalFileName, "Downloading (0%)...", progress = 0, isFinal = false, file = file)
+
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                    totalBytesRead += bytesRead
+                    
+                    val progress = if (contentLength > 0) (totalBytesRead.toFloat() / contentLength) else 0f
+                    val progressPct = (progress * 100).toInt().coerceIn(0, 100)
+                    
+                    val now = System.currentTimeMillis()
+                    if (now - lastProgressUpdate > 1200 || totalBytesRead == contentLength.toLong()) {
+                        lastProgressUpdate = now
+                        
+                        val updatedDownload = DownloadEntity(
+                            id = downloadId,
+                            fileName = finalFileName,
+                            url = url,
+                            size = readableSize,
+                            progress = if (contentLength > 0) progress else 0.5f,
+                            isCompleted = false,
+                            filePath = actualFilePath
+                        )
+                        repository.insertDownload(updatedDownload)
+                        showDownloadNotification(context, finalFileName, "Downloading ($progressPct%)...", progress = progressPct, isFinal = false, file = file)
                     }
-                    cursor?.close()
+                }
+
+                outputStream.flush()
+
+                // Register file download completed in SQLite and System Notification panel
+                val finalDownload = DownloadEntity(
+                    id = downloadId,
+                    fileName = finalFileName,
+                    url = url,
+                    size = readableSize,
+                    progress = 1.0f,
+                    isCompleted = true,
+                    filePath = actualFilePath
+                )
+                repository.insertDownload(finalDownload)
+
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    showToast("Download completed successfully!")
+                    showDownloadNotification(context, finalFileName, "Download completed!", progress = 100, isFinal = true, file = file)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("BrowserViewModel", "Direct Applet Download failed", e)
+                try {
+                    file.delete()
+                } catch (ignored: Exception) {}
+                
+                val failedDownload = DownloadEntity(
+                    id = downloadId,
+                    fileName = finalFileName,
+                    url = url,
+                    size = "Failed",
+                    progress = 0f,
+                    isCompleted = false,
+                    filePath = ""
+                )
+                repository.insertDownload(failedDownload)
+                
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    showToast("Download failed: $finalFileName")
+                    showDownloadNotification(context, finalFileName, "Download failed or timed out.", progress = 0, isFinal = true, file = null)
+                }
+            } finally {
+                try { outputStream?.close() } catch (ignored: Exception) {}
+                try { inputStream?.close() } catch (ignored: Exception) {}
+                try { connection?.disconnect() } catch (ignored: Exception) {}
+            }
+        }
+    }
+
+    fun downloadBase64Data(
+        context: android.content.Context,
+        base64Url: String,
+        fileName: String,
+        mimetype: String,
+        downloadId: String = java.util.UUID.randomUUID().toString()
+    ) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val commaIndex = base64Url.indexOf(",")
+                val cleanBase64 = if (commaIndex != -1) base64Url.substring(commaIndex + 1) else base64Url
+                val decodedBytes = android.util.Base64.decode(cleanBase64, android.util.Base64.DEFAULT)
+
+                var ext = ""
+                if (mimetype.isNotEmpty()) {
+                    ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mimetype) ?: ""
+                }
+                if (ext.isEmpty() && base64Url.startsWith("data:")) {
+                    val firstPart = base64Url.substring(0, commaIndex)
+                    if (firstPart.contains(";") && firstPart.contains("/")) {
+                        val mime = firstPart.substring(firstPart.indexOf(":") + 1, firstPart.indexOf(";"))
+                        ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: ""
+                    }
+                }
+
+                var finalFileName = fileName
+                if (ext.isNotEmpty() && !finalFileName.contains(".")) {
+                    finalFileName = "$finalFileName.$ext"
+                }
+
+                val publicDownloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                if (!publicDownloadsDir.exists()) {
+                    publicDownloadsDir.mkdirs()
+                }
+                val file = java.io.File(publicDownloadsDir, finalFileName)
+                file.writeBytes(decodedBytes)
+
+                val sizeText = "${decodedBytes.size / 1024} KB"
+                val finalDownload = DownloadEntity(
+                    id = downloadId,
+                    fileName = finalFileName,
+                    url = "data:...",
+                    size = sizeText,
+                    progress = 1.0f,
+                    isCompleted = true,
+                    filePath = file.absolutePath
+                )
+                repository.insertDownload(finalDownload)
+
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    showToast("Download completed successfully!")
+                    showDownloadNotification(context, finalFileName, "Download completed!", progress = 100, isFinal = true, file = file)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("BrowserViewModel", "Failed to decode and save base64 data stream", e)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    showToast("Failed to process download data format.")
                 }
             }
-        } catch (e: Exception) {
-            android.util.Log.e("BrowserViewModel", "Failed to enqueue download", e)
-            showToast("Failed to start download.")
         }
     }
 
@@ -529,7 +685,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun showDownloadNotification(context: android.content.Context, title: String, message: String) {
+    private fun showDownloadNotification(
+        context: android.content.Context,
+        title: String,
+        message: String,
+        progress: Int = 0,
+        isFinal: Boolean = false,
+        file: java.io.File? = null
+    ) {
         val channelId = "browser_downloads"
         val channelName = "Downloads"
         val notificationManager = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
@@ -541,18 +704,54 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             notificationManager.createNotificationChannel(channel)
         }
 
-        val notification = androidx.core.app.NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+        // Build elegant Chrome-like PendingIntent supporting direct file-opening triggers
+        val intent = if (isFinal && file != null && file.exists()) {
+            try {
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "com.mtos.web.browser.fileprovider",
+                    file
+                )
+                val ext = file.extension.lowercase()
+                val mimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mimeType)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            } catch (e: Exception) {
+                context.packageManager.getLaunchIntentForPackage(context.packageName)
+            }
+        } else {
+            context.packageManager.getLaunchIntentForPackage(context.packageName)
+        }
+
+        val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        } else {
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pendingIntent = android.app.PendingIntent.getActivity(context, title.hashCode(), intent, flags)
+
+        val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(if (isFinal) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(message)
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
             .setAutoCancel(true)
-            .build()
+
+        if (!isFinal) {
+            builder.setProgress(100, progress, false)
+            builder.setOngoing(true) // prevent dismiss in-progress downloads
+        } else {
+            builder.setProgress(0, 0, false)
+        }
 
         try {
-            notificationManager.notify(title.hashCode(), notification)
+            notificationManager.notify(title.hashCode(), builder.build())
         } catch (e: Exception) {
-            android.util.Log.e("BrowserViewModel", "Failed to post notification", e)
+            android.util.Log.e("BrowserViewModel", "Failed to post secure notification", e)
         }
     }
 

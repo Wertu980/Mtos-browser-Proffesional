@@ -22,6 +22,14 @@ class MainActivity : ComponentActivity() {
         // Handle URL from other applications on launch
         handleIntent(intent)
 
+        // Request POST_NOTIFICATIONS runtime permission on startup if on Android 13+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val permission = android.Manifest.permission.POST_NOTIFICATIONS
+            if (checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(permission), 101)
+            }
+        }
+
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {

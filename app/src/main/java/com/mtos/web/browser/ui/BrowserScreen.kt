@@ -2054,6 +2054,7 @@ fun getOrCreateWebView(
                 setAcceptThirdPartyCookies(webViewInstance, !isIncognito)
             }
             
+            addJavascriptInterface(DownloadCaptureInterface(this, viewModel), "AndroidDownloadManager")
             if (isIncognito) {
                 clearCache(true)
                 clearHistory()
@@ -2067,9 +2068,32 @@ fun getOrCreateWebView(
                     val kb = contentLength / 1024
                     if (kb > 1024) "${kb / 1024} MB" else "$kb KB"
                 } else {
-                    "Unknown size"
+                    ""
                 }
-                viewModel.startDownload(context, url, fileName, sizeText)
+                
+                if (url.startsWith("blob:")) {
+                    val js = """
+                        (function() {
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', '$url', true);
+                            xhr.responseType = 'blob';
+                            xhr.onload = function(e) {
+                                if (this.status == 200) {
+                                    var blob = this.response;
+                                    var reader = new FileReader();
+                                    reader.onload = function(evt) {
+                                        AndroidDownloadManager.downloadBase64(evt.target.result, '$fileName', '$mimetype');
+                                    };
+                                    reader.readAsDataURL(blob);
+                                }
+                            };
+                            xhr.send();
+                        })();
+                    """.trimIndent()
+                    evaluateJavascript(js, null)
+                } else {
+                    viewModel.startDownload(context, url, fileName, sizeText, mimetype, contentDisposition, userAgent)
+                }
             }
 
             webViewClient = object : WebViewClient() {
@@ -2281,6 +2305,18 @@ fun getOrCreateWebView(
             if (initialUrl.isNotBlank() && initialUrl != "browser://home") {
                 loadUrl(initialUrl)
             }
+        }
+    }
+}
+
+class DownloadCaptureInterface(
+    private val webView: WebView,
+    private val viewModel: BrowserViewModel
+) {
+    @android.webkit.JavascriptInterface
+    fun downloadBase64(base64Data: String, fileName: String, mimeType: String) {
+        webView.post {
+            viewModel.downloadBase64Data(webView.context, base64Data, fileName, mimeType)
         }
     }
 }
