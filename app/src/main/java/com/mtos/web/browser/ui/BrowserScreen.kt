@@ -110,6 +110,7 @@ fun BrowserScreen(
     val activeTab by viewModel.activeTab.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
+    val activeSearchEngine by viewModel.activeSearchEngine.collectAsStateWithLifecycle()
 
     // Persistent Map of WebViews indexed by Tab UUID
     val webViews = remember { mutableStateMapOf<String, WebView>() }
@@ -396,7 +397,7 @@ fun BrowserScreen(
                                 .testTag("url_input_field"),
                             placeholder = {
                                 Text(
-                                    "Search or type web address...",
+                                    "Search ${activeSearchEngine.name} or type web address...",
                                     style = LocalTextStyle.current.copy(fontSize = 14.sp)
                                 )
                             },
@@ -521,6 +522,32 @@ fun BrowserScreen(
                                             contentDescription = null
                                         )
                                     }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text("Search Engine")
+                                            Text(
+                                                text = "${activeSearchEngine.name} (${activeSearchEngine.displayDomain})",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        activeScreen = "search_engine"
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("menu_search_engine")
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Downloads") },
@@ -763,6 +790,7 @@ fun BrowserScreen(
                 StartPageDashboard(
                     speedDials = speedDials,
                     isIncognito = activeTab?.isIncognito == true,
+                    activeSearchEngine = activeSearchEngine,
                     onSearchQuerySubmitted = { query ->
                         val resolved = viewModel.resolveUrl(query)
                         viewModel.updateUrl(activeTabId, resolved)
@@ -847,6 +875,16 @@ fun BrowserScreen(
         FullPasswordManagerScreen(
             viewModel = viewModel,
             currentUrl = activeTab?.url ?: "",
+            onBack = { activeScreen = "browser" }
+        )
+    } else if (activeScreen == "search_engine") {
+        FullSearchEngineScreen(
+            viewModel = viewModel,
+            onOpenEngineSite = { targetUrl ->
+                viewModel.updateUrl(activeTabId, targetUrl)
+                activeWebView?.loadUrl(targetUrl)
+                activeScreen = "browser"
+            },
             onBack = { activeScreen = "browser" }
         )
     }
@@ -1364,6 +1402,7 @@ fun BrowserScreen(
 fun StartPageDashboard(
     speedDials: List<SpeedDialItem>,
     isIncognito: Boolean,
+    activeSearchEngine: SearchEngineOption = BrowserViewModel.GOOGLE_SEARCH_ENGINE,
     onSearchQuerySubmitted: (String) -> Unit,
     onDialClicked: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -1475,7 +1514,7 @@ fun StartPageDashboard(
                         .testTag("dashboard_search_input"),
                     placeholder = { 
                         Text(
-                            "Search Google or enter Address...",
+                            "Search ${activeSearchEngine.name} or enter Address...",
                             color = if (isIncognito) Color.Gray else Color.Unspecified
                         ) 
                     },

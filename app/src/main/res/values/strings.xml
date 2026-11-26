@@ -1,3 +1,20 @@
 <resources>
     <string name="app_name">MTOS Browser</string>
+    <string name="menu_search_engine">Search Engine</string>
+    <string name="search_engine_title">Search Engine</string>
+    <string name="search_engine_active_label">Active Search Engine</string>
+    <string name="search_engine_builtin_section">Default Search Engines</string>
+    <string name="search_engine_custom_section">Your Custom Engines</string>
+    <string name="search_engine_add_section">Add Your Own Search Link</string>
+    <string name="search_engine_edit_section">Edit Custom Search Link</string>
+    <string name="search_engine_url_label">Search engine link or URL</string>
+    <string name="search_engine_url_placeholder">e.g. duckduckgo.com or https://example.com/search?q=%s</string>
+    <string name="search_engine_name_label">Display name (optional)</string>
+    <string name="search_engine_name_placeholder">e.g. DuckDuckGo, My Search</string>
+    <string name="search_engine_helper_text">Enter any website domain or search URL. Use %s where the search query should go, or enter a plain link and we will attach ?q= automatically.</string>
+    <string name="search_engine_save_choose">Save &amp; Use Link</string>
+    <string name="search_engine_update_choose">Update &amp; Use Link</string>
+    <string name="search_engine_cancel">Cancel</string>
+    <string name="search_engine_open_home">Open Site</string>
+    <string name="search_engine_back_desc">Back to browser</string>
 </resources>

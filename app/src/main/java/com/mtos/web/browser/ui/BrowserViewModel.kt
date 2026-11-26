@@ -49,6 +49,15 @@ data class PasswordSavePromptState(
     val plainText: String
 )
 
+data class SearchEngineOption(
+    val id: String,
+    val name: String,
+    val displayDomain: String,
+    val homeUrl: String,
+    val searchUrlTemplate: String,
+    val isBuiltIn: Boolean = false
+)
+
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
     private val repository = BrowserRepository(database)
@@ -64,6 +73,24 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private val _lastSyncTime = MutableStateFlow<Long?>(null)
     val lastSyncTime: StateFlow<Long?> = _lastSyncTime.asStateFlow()
+
+    // Search Engine state (Google pre-selected default, MTOS second built-in, plus user custom links)
+    private val _customSearchEngines = MutableStateFlow<List<SearchEngineOption>>(emptyList())
+    val customSearchEngines: StateFlow<List<SearchEngineOption>> = _customSearchEngines.asStateFlow()
+
+    private val _selectedSearchEngineId = MutableStateFlow(GOOGLE_ENGINE_ID)
+    val selectedSearchEngineId: StateFlow<String> = _selectedSearchEngineId.asStateFlow()
+
+    val searchEngines: StateFlow<List<SearchEngineOption>> = _customSearchEngines
+        .map { customList -> BUILT_IN_SEARCH_ENGINES + customList }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BUILT_IN_SEARCH_ENGINES)
+
+    val activeSearchEngine: StateFlow<SearchEngineOption> = combine(
+        searchEngines,
+        _selectedSearchEngineId
+    ) { engines, selectedId ->
+        engines.find { it.id == selectedId } ?: GOOGLE_SEARCH_ENGINE
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), GOOGLE_SEARCH_ENGINE)
 
     // Observe bookmarks and history
     val bookmarks: StateFlow<List<Bookmark>> = repository.allBookmarks
@@ -204,6 +231,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         if (savedSyncTime != -1L) {
             _lastSyncTime.value = savedSyncTime
         }
+
+        // Restore custom search engines and selected search engine (defaults to Google)
+        loadSearchEnginesFromPrefs()
 
         viewModelScope.launch {
             try {
@@ -759,8 +789,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         val tab = _tabs.value.find { it.id == tabId }
         val isIncognito = tab?.isIncognito == true
         
+        val activeEngine = activeSearchEngine.value
         val polishedTitle = if (title.isBlank()) {
-            if (url.startsWith("https://www.google.com/search")) "Google Search" else url
+            val activeHost = activeEngine.displayDomain.lowercase()
+            if (url.startsWith("https://www.google.com/search")) {
+                "Google Search"
+            } else if (activeHost.isNotBlank() && url.lowercase().contains(activeHost) && url.contains("?")) {
+                "${activeEngine.name} Search"
+            } else {
+                url
+            }
         } else {
             title
         }
@@ -820,11 +858,150 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun loadSearchEnginesFromPrefs() {
+        val savedJson = sharedPrefs.getString(PREF_CUSTOM_SEARCH_ENGINES, null)
+        val parsedCustom = mutableListOf<SearchEngineOption>()
+        if (!savedJson.isNullOrBlank()) {
+            try {
+                val jsonArray = org.json.JSONArray(savedJson)
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.optJSONObject(i) ?: continue
+                    val id = obj.optString("id").ifBlank { continue }
+                    val name = obj.optString("name").ifBlank { continue }
+                    val displayDomain = obj.optString("displayDomain")
+                    val homeUrl = obj.optString("homeUrl")
+                    val template = obj.optString("searchUrlTemplate").ifBlank { continue }
+                    parsedCustom.add(
+                        SearchEngineOption(
+                            id = id,
+                            name = name,
+                            displayDomain = displayDomain.ifBlank { extractDisplayDomain(template) },
+                            homeUrl = homeUrl.ifBlank { extractHomeUrl(template) },
+                            searchUrlTemplate = template,
+                            isBuiltIn = false
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("BrowserViewModel", "Failed to parse custom search engines", e)
+            }
+        }
+        _customSearchEngines.value = parsedCustom
+
+        val savedId = sharedPrefs.getString(PREF_SELECTED_SEARCH_ENGINE_ID, GOOGLE_ENGINE_ID)
+            ?: GOOGLE_ENGINE_ID
+        val allEngines = BUILT_IN_SEARCH_ENGINES + parsedCustom
+        _selectedSearchEngineId.value = if (allEngines.any { it.id == savedId }) savedId else GOOGLE_ENGINE_ID
+    }
+
+    private fun persistCustomSearchEngines(engines: List<SearchEngineOption>) {
+        val jsonArray = org.json.JSONArray()
+        engines.forEach { engine ->
+            val obj = org.json.JSONObject().apply {
+                put("id", engine.id)
+                put("name", engine.name)
+                put("displayDomain", engine.displayDomain)
+                put("homeUrl", engine.homeUrl)
+                put("searchUrlTemplate", engine.searchUrlTemplate)
+            }
+            jsonArray.put(obj)
+        }
+        sharedPrefs.edit()
+            .putString(PREF_CUSTOM_SEARCH_ENGINES, jsonArray.toString())
+            .apply()
+    }
+
+    fun selectSearchEngine(engineId: String) {
+        val target = (BUILT_IN_SEARCH_ENGINES + _customSearchEngines.value).find { it.id == engineId }
+            ?: GOOGLE_SEARCH_ENGINE
+        _selectedSearchEngineId.value = target.id
+        sharedPrefs.edit()
+            .putString(PREF_SELECTED_SEARCH_ENGINE_ID, target.id)
+            .apply()
+        showToast("Search engine set to ${target.name}")
+    }
+
+    /**
+     * Validates and saves a user-defined search engine link, then selects it immediately.
+     * Returns a validation error message if invalid, or null on success.
+     */
+    fun addOrUpdateCustomSearchEngine(
+        customName: String,
+        rawLink: String,
+        editingEngineId: String? = null
+    ): String? {
+        val normalized = normalizeCustomSearchLink(rawLink)
+            ?: return "Please enter a valid web link (e.g. duckduckgo.com or https://example.com/search?q=%s)."
+
+        val domain = extractDisplayDomain(normalized)
+        val homeUrl = extractHomeUrl(normalized)
+        val resolvedName = customName.trim().ifBlank { deriveDefaultEngineName(domain) }
+
+        val updatedList = _customSearchEngines.value.toMutableList()
+        val finalId = if (!editingEngineId.isNullOrBlank()) {
+            val idx = updatedList.indexOfFirst { it.id == editingEngineId }
+            val updated = SearchEngineOption(
+                id = editingEngineId,
+                name = resolvedName,
+                displayDomain = domain,
+                homeUrl = homeUrl,
+                searchUrlTemplate = normalized,
+                isBuiltIn = false
+            )
+            if (idx >= 0) {
+                updatedList[idx] = updated
+            } else {
+                updatedList.add(updated)
+            }
+            editingEngineId
+        } else {
+            val newId = "custom_${UUID.randomUUID()}"
+            updatedList.add(
+                SearchEngineOption(
+                    id = newId,
+                    name = resolvedName,
+                    displayDomain = domain,
+                    homeUrl = homeUrl,
+                    searchUrlTemplate = normalized,
+                    isBuiltIn = false
+                )
+            )
+            newId
+        }
+
+        _customSearchEngines.value = updatedList
+        persistCustomSearchEngines(updatedList)
+        _selectedSearchEngineId.value = finalId
+        sharedPrefs.edit()
+            .putString(PREF_SELECTED_SEARCH_ENGINE_ID, finalId)
+            .apply()
+
+        showToast(if (editingEngineId != null) "Updated & selected $resolvedName" else "Added & selected $resolvedName")
+        return null
+    }
+
+    fun deleteCustomSearchEngine(engineId: String) {
+        val current = _customSearchEngines.value
+        val target = current.find { it.id == engineId } ?: return
+        val updated = current.filterNot { it.id == engineId }
+        _customSearchEngines.value = updated
+        persistCustomSearchEngines(updated)
+
+        if (_selectedSearchEngineId.value == engineId) {
+            _selectedSearchEngineId.value = GOOGLE_ENGINE_ID
+            sharedPrefs.edit()
+                .putString(PREF_SELECTED_SEARCH_ENGINE_ID, GOOGLE_ENGINE_ID)
+                .apply()
+        }
+        showToast("Removed ${target.name}")
+    }
+
     fun resolveUrl(input: String): String {
         val trimmed = input.trim()
-        if (trimmed.isEmpty()) return "https://www.google.com"
+        val currentEngine = activeSearchEngine.value
+        if (trimmed.isEmpty()) return currentEngine.homeUrl
 
-        // Recognizes domains like google.com, test.co, custom IP, etc.
+        // Recognizes domains like google.com, mtos-org.site, test.co, custom IP, etc.
         val urlPattern = "^(https?://)?([a-zA-Z0-9-]+\\.)+[a-zA-Z0-9-]{2,}(/.*)?$".toRegex()
         return if (trimmed.matches(urlPattern) || trimmed.startsWith("localhost") || trimmed.startsWith("10.0.2.2")) {
             if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
@@ -833,9 +1010,124 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 trimmed
             }
         } else {
-            // Google search query
-            val queryEncoded = URLEncoder.encode(trimmed, "UTF-8")
-            "https://www.google.com/search?q=$queryEncoded"
+            buildSearchUrlForTemplate(trimmed, currentEngine.searchUrlTemplate)
+        }
+    }
+
+    companion object {
+        private const val PREF_SELECTED_SEARCH_ENGINE_ID = "selected_search_engine_id"
+        private const val PREF_CUSTOM_SEARCH_ENGINES = "custom_search_engines_json"
+
+        const val GOOGLE_ENGINE_ID = "google"
+        const val MTOS_ENGINE_ID = "mtos"
+
+        val GOOGLE_SEARCH_ENGINE = SearchEngineOption(
+            id = GOOGLE_ENGINE_ID,
+            name = "Google",
+            displayDomain = "google.com",
+            homeUrl = "https://www.google.com",
+            searchUrlTemplate = "https://www.google.com/search?q=%s",
+            isBuiltIn = true
+        )
+
+        val MTOS_SEARCH_ENGINE = SearchEngineOption(
+            id = MTOS_ENGINE_ID,
+            name = "MTOS",
+            displayDomain = "mtos-org.site",
+            homeUrl = "https://mtos-org.site",
+            searchUrlTemplate = "https://mtos-org.site/?q=%s",
+            isBuiltIn = true
+        )
+
+        val BUILT_IN_SEARCH_ENGINES = listOf(
+            GOOGLE_SEARCH_ENGINE,
+            MTOS_SEARCH_ENGINE
+        )
+
+        fun normalizeCustomSearchLink(rawInput: String): String? {
+            val trimmed = rawInput.trim()
+            if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() }) return null
+
+            val lower = trimmed.lowercase()
+            // Reject unsafe or non-web schemes
+            if (lower.startsWith("javascript:") ||
+                lower.startsWith("file:") ||
+                lower.startsWith("data:") ||
+                lower.startsWith("content:") ||
+                lower.startsWith("about:")
+            ) {
+                return null
+            }
+
+            val withScheme = if (lower.startsWith("http://") || lower.startsWith("https://")) {
+                trimmed
+            } else if (trimmed.contains("://")) {
+                return null
+            } else {
+                "https://$trimmed"
+            }
+
+            val parsed = try {
+                android.net.Uri.parse(withScheme.replace("%s", "query").replace("{query}", "query"))
+            } catch (e: Exception) {
+                return null
+            }
+
+            val host = parsed.host?.trim().orEmpty()
+            val isValidHost = host.equals("localhost", ignoreCase = true) ||
+                (host.contains(".") && !host.startsWith(".") && !host.endsWith(".") && host.length >= 3)
+            return if (isValidHost) withScheme else null
+        }
+
+        fun extractDisplayDomain(normalizedUrl: String): String {
+            return try {
+                val host = android.net.Uri.parse(
+                    normalizedUrl.replace("%s", "query").replace("{query}", "query")
+                ).host.orEmpty()
+                host.removePrefix("www.").ifBlank { normalizedUrl }
+            } catch (e: Exception) {
+                normalizedUrl
+            }
+        }
+
+        fun extractHomeUrl(normalizedUrl: String): String {
+            return try {
+                val uri = android.net.Uri.parse(
+                    normalizedUrl.replace("%s", "query").replace("{query}", "query")
+                )
+                val scheme = uri.scheme ?: "https"
+                val host = uri.host ?: return normalizedUrl
+                val portPart = if (uri.port != -1) ":${uri.port}" else ""
+                "$scheme://$host$portPart"
+            } catch (e: Exception) {
+                normalizedUrl
+            }
+        }
+
+        fun deriveDefaultEngineName(displayDomain: String): String {
+            val clean = displayDomain.removePrefix("www.")
+            val primaryLabel = clean.substringBefore(".").ifBlank { clean }
+            return primaryLabel.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
+
+        fun buildSearchUrlForTemplate(query: String, rawTemplate: String): String {
+            val queryEncoded = URLEncoder.encode(query, "UTF-8")
+            val normalized = normalizeCustomSearchLink(rawTemplate) ?: GOOGLE_SEARCH_ENGINE.searchUrlTemplate
+            return when {
+                normalized.contains("%s") -> normalized.replace("%s", queryEncoded)
+                normalized.contains("{query}") -> normalized.replace("{query}", queryEncoded)
+                normalized.endsWith("=") -> "$normalized$queryEncoded"
+                normalized.contains("?") -> "$normalized&q=$queryEncoded"
+                else -> {
+                    val withoutScheme = normalized.removePrefix("https://").removePrefix("http://")
+                    val hasPath = withoutScheme.contains("/")
+                    if (hasPath) {
+                        if (normalized.endsWith("/")) "${normalized}?q=$queryEncoded" else "$normalized?q=$queryEncoded"
+                    } else {
+                        "$normalized/?q=$queryEncoded"
+                    }
+                }
+            }
         }
     }
 }
